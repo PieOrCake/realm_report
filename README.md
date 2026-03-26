@@ -6,6 +6,10 @@ A Guild Wars 2 addon for [Raidcore Nexus](https://raidcore.gg/Nexus) that provid
 
 This addon has been 100% created in [Windsurf](https://windsurf.com/) using Claude.
 
+## Screenshot
+
+![Realm Report](images/main_window.png)
+
 ## Features
 
 - **Live WvW objective tracking** — polls the official GW2 API every 30 seconds (configurable)
