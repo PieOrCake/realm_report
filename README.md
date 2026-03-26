@@ -73,24 +73,6 @@ This produces `RealmReport.dll`.
 - Click column headers to sort
 - Use the filter checkboxes to narrow down maps or objective types
 
-## Project Structure
-
-```
-realm_report/
-├── CMakeLists.txt              # Build configuration
-├── RealmReport.def             # DLL export definition
-├── include/
-│   └── nexus/
-│       └── Nexus.h             # Raidcore Nexus API header
-├── src/
-│   ├── dllmain.cpp             # Addon entry point, ImGui UI, world selector, objectives table
-│   ├── WvWAPI.h                # WvW API client interface
-│   └── WvWAPI.cpp              # HTTP polling, JSON parsing, world list, match data
-├── scripts/
-│   └── setup.sh                # Dependency download script
-└── README.md
-```
-
 ## License
 
 This project is licensed under the MIT License.
