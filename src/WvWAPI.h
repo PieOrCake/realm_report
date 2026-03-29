@@ -156,6 +156,10 @@ namespace RealmReport {
         static void SetToastDuration(float seconds);
         static float GetToastDuration();
 
+        // Pinned opacity
+        static void SetPinnedOpacity(float opacity);
+        static float GetPinnedOpacity();
+
         // Flip sound
         static void SetFlipSound(bool enabled, const std::string& filename);
         static bool GetFlipSoundEnabled();
@@ -180,6 +184,8 @@ namespace RealmReport {
         static void FetchMatchData();
         static void FetchObjectiveNames();
         static void FetchGuildName(const std::string& guild_id);
+        static void LoadGuildCache();
+        static void SaveGuildCache();
         static void ResolveObjectives(MatchData& match);
 
         // Objective name cache: objective_id -> name
@@ -215,6 +221,7 @@ namespace RealmReport {
         static std::string s_flip_sound_path;
         static int s_sort_column;
         static bool s_sort_ascending;
+        static float s_pinned_opacity;
     };
 
     // Utility

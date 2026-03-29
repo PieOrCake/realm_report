@@ -15,7 +15,7 @@
 // Version constants
 #define V_MAJOR 0
 #define V_MINOR 9
-#define V_BUILD 0
+#define V_BUILD 1
 #define V_REVISION 0
 
 
@@ -120,6 +120,7 @@ static bool  g_ToastEditMode = false;
 static bool  g_ToastResetPos = false;
 static bool  g_Paused = false;
 static bool  g_WindowPinned = false;
+static float g_PinnedOpacity = 0.6f;
 static bool  g_FlipSound = false;
 static std::string g_FlipSoundFile;  // just the filename, resolved against sounds/ dir
 
@@ -432,6 +433,7 @@ static void RenderScoreboard(const RealmReport::MatchData& match) {
     ImGui::SameLine(0, 15);
     ImGui::TextColored(GetTeamColor(RealmReport::TeamColor::Green), "%s %d",
         match.world_green.c_str(), match.score_green);
+
 }
 
 // --- Filter Bar (compact) ---
@@ -889,6 +891,7 @@ void AddonLoad(AddonAPI_t* aApi) {
     g_ToastDuration = RealmReport::WvWAPI::GetToastDuration();
     g_FlipSound = RealmReport::WvWAPI::GetFlipSoundEnabled();
     g_FlipSoundFile = RealmReport::WvWAPI::GetFlipSoundFile();
+    g_PinnedOpacity = RealmReport::WvWAPI::GetPinnedOpacity();
     g_FlatList = RealmReport::WvWAPI::GetFlatList();
     {
         int col; bool asc;
@@ -909,6 +912,7 @@ void AddonLoad(AddonAPI_t* aApi) {
 
     // Register keybind
     APIDefs->InputBinds_RegisterWithString("KB_REALM_TOGGLE", ProcessKeybind, "ALT+SHIFT+W");
+    APIDefs->InputBinds_RegisterWithString("KB_REALM_PIN", ProcessKeybind, "(null)");
 
     // Register close-on-escape
     APIDefs->GUI_RegisterCloseOnEscape("Realm Report", &g_WindowVisible);
@@ -921,6 +925,7 @@ void AddonUnload() {
 
     APIDefs->GUI_DeregisterCloseOnEscape("Realm Report");
     APIDefs->InputBinds_Deregister("KB_REALM_TOGGLE");
+    APIDefs->InputBinds_Deregister("KB_REALM_PIN");
     APIDefs->GUI_Deregister(AddonOptions);
     APIDefs->GUI_Deregister(AddonRender);
 
@@ -940,6 +945,11 @@ void ProcessKeybind(const char* aIdentifier, bool aIsRelease) {
         if (APIDefs) {
             APIDefs->Log(LOGL_INFO, "RealmReport",
                 g_WindowVisible ? "Window shown" : "Window hidden");
+        }
+    }
+    if (strcmp(aIdentifier, "KB_REALM_PIN") == 0) {
+        if (g_WindowVisible) {
+            g_WindowPinned = !g_WindowPinned;
         }
     }
 }
@@ -1169,10 +1179,18 @@ static void RenderToasts() {
 
         ImGuiWindowFlags toast_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-                                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing |
+                                       ImGuiWindowFlags_NoFocusOnAppearing |
                                        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
 
         if (ImGui::Begin(wndId, nullptr, toast_flags)) {
+            // Click to dismiss
+            if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                g_Toasts.erase(g_Toasts.begin() + i);
+                ImGui::End();
+                ImGui::PopStyleColor(2);
+                ImGui::PopStyleVar(2);
+                continue;
+            }
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 cursor = ImGui::GetCursorScreenPos();
             float fontSize = ImGui::GetFontSize();
@@ -1265,15 +1283,20 @@ void AddonRender() {
 
     ImGui::SetNextWindowSizeConstraints(ImVec2(380, 200), ImVec2(FLT_MAX, FLT_MAX));
     ImGuiWindowFlags winFlags = ImGuiWindowFlags_NoCollapse;
+    bool pushedAlpha = false;
     if (g_WindowPinned) {
         winFlags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
                  |  ImGuiWindowFlags_NoInputs
                  |  ImGuiWindowFlags_NoBringToFrontOnFocus
                  |  ImGuiWindowFlags_NoFocusOnAppearing;
+        ImGui::SetNextWindowBgAlpha(g_PinnedOpacity);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, g_PinnedOpacity);
+        pushedAlpha = true;
     }
     if (!ImGui::Begin("Realm Report - WvW Objectives", &g_WindowVisible, winFlags))
     {
         ImGui::End();
+        if (pushedAlpha) ImGui::PopStyleVar();
         return;
     }
 
@@ -1402,6 +1425,9 @@ void AddonRender() {
     ImVec2 mainWinPos = ImGui::GetWindowPos();
     ImVec2 mainWinSize = ImGui::GetWindowSize();
     ImGui::End();
+    if (pushedAlpha) {
+        ImGui::PopStyleVar(); // Alpha
+    }
 
     // Separate small overlay for Unpin button (clickable even when main window has NoInputs)
     if (g_WindowPinned && g_WindowVisible) {
@@ -1434,6 +1460,18 @@ void AddonOptions() {
     if (ImGui::SliderInt("Poll Interval (seconds)", &interval, 20, 120)) {
         RealmReport::WvWAPI::SetPollIntervalSeconds(interval);
         RealmReport::WvWAPI::SaveSelectedWorld();
+    }
+
+    ImGui::Spacing();
+
+    // Pinned opacity
+    {
+        int pct = (int)(g_PinnedOpacity * 100.0f + 0.5f);
+        if (ImGui::SliderInt("Opacity when Pinned", &pct, 10, 100, "%d%%")) {
+            g_PinnedOpacity = pct / 100.0f;
+            RealmReport::WvWAPI::SetPinnedOpacity(g_PinnedOpacity);
+            RealmReport::WvWAPI::SaveSelectedWorld();
+        }
     }
 
     ImGui::Spacing();

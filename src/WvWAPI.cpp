@@ -95,6 +95,7 @@ namespace RealmReport {
     std::string WvWAPI::s_flip_sound_path;
     int WvWAPI::s_sort_column = (int)SortColumn::TimeSinceFlip;
     bool WvWAPI::s_sort_ascending = true;
+    float WvWAPI::s_pinned_opacity = 0.6f;
 
     // --- Helper: get DLL directory ---
 
@@ -179,6 +180,7 @@ namespace RealmReport {
             s_status_message = "Initializing...";
             s_is_error.store(false);
         }
+        LoadGuildCache();
     }
 
     void WvWAPI::Shutdown() {
@@ -324,6 +326,16 @@ namespace RealmReport {
         ascending = s_sort_ascending;
     }
 
+    void WvWAPI::SetPinnedOpacity(float opacity) {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_pinned_opacity = opacity;
+    }
+
+    float WvWAPI::GetPinnedOpacity() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        return s_pinned_opacity;
+    }
+
     void WvWAPI::SetToastDuration(float seconds) {
         std::lock_guard<std::mutex> lock(s_mutex);
         s_toast_duration = seconds;
@@ -420,6 +432,7 @@ namespace RealmReport {
             j["flip_sound_path"] = s_flip_sound_path;
             j["sort_column"] = s_sort_column;
             j["sort_ascending"] = s_sort_ascending;
+            j["pinned_opacity"] = s_pinned_opacity;
         }
         std::ofstream file(path);
         if (file.is_open()) {
@@ -462,6 +475,11 @@ namespace RealmReport {
             }
             if (j.contains("sort_column")) s_sort_column = j["sort_column"].get<int>();
             if (j.contains("sort_ascending")) s_sort_ascending = j["sort_ascending"].get<bool>();
+            if (j.contains("pinned_opacity")) {
+                s_pinned_opacity = j["pinned_opacity"].get<float>();
+                if (s_pinned_opacity < 0.1f) s_pinned_opacity = 0.1f;
+                if (s_pinned_opacity > 1.0f) s_pinned_opacity = 1.0f;
+            }
             return s_selected_world > 0;
         } catch (...) {
             return false;
@@ -496,6 +514,35 @@ namespace RealmReport {
 
     // --- Guild Name Resolution ---
 
+    void WvWAPI::LoadGuildCache() {
+        std::string path = GetDataDirectory() + "/guild_cache.json";
+        std::ifstream file(path);
+        if (!file.is_open()) return;
+        try {
+            json j;
+            file >> j;
+            std::lock_guard<std::mutex> lock(s_mutex);
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                s_guild_names[it.key()] = it.value().get<std::string>();
+            }
+        } catch (...) {}
+    }
+
+    void WvWAPI::SaveGuildCache() {
+        std::string path = GetDataDirectory() + "/guild_cache.json";
+        json j;
+        {
+            std::lock_guard<std::mutex> lock(s_mutex);
+            for (const auto& kv : s_guild_names) {
+                j[kv.first] = kv.second;
+            }
+        }
+        std::ofstream file(path);
+        if (file.is_open()) {
+            file << j.dump(2);
+        }
+    }
+
     void WvWAPI::FetchGuildName(const std::string& guild_id) {
         if (guild_id.empty()) return;
 
@@ -516,8 +563,11 @@ namespace RealmReport {
             if (!tag.empty()) {
                 display = "[" + tag + "] " + name;
             }
-            std::lock_guard<std::mutex> lock(s_mutex);
-            s_guild_names[guild_id] = display;
+            {
+                std::lock_guard<std::mutex> lock(s_mutex);
+                s_guild_names[guild_id] = display;
+            }
+            SaveGuildCache();
         } catch (...) {
             std::lock_guard<std::mutex> lock(s_mutex);
             s_guild_names[guild_id] = guild_id.substr(0, 8) + "...";
