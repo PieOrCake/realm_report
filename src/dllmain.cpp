@@ -1602,7 +1602,7 @@ extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef() {
     AddonDef.Version.Minor = V_MINOR;
     AddonDef.Version.Build = V_BUILD;
     AddonDef.Version.Revision = V_REVISION;
-    AddonDef.Author = "RealmReport";
+    AddonDef.Author = "PieOrCake.7635";
     AddonDef.Description = "WvW objective tracker - live overview of camps, towers, keeps across all maps";
     AddonDef.Load = AddonLoad;
     AddonDef.Unload = AddonUnload;
