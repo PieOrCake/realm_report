@@ -17,7 +17,7 @@
 #define V_MAJOR 0
 #define V_MINOR 9
 #define V_BUILD 1
-#define V_REVISION 1
+#define V_REVISION 2
 
 
 // --- Mumble Link structures (minimal, for map type detection) ---
@@ -105,6 +105,49 @@ static bool g_SortAscending = true;
 
 // Display mode
 static bool g_FlatList = false;
+
+// --- Cached render data (rebuilt only when data/filters/sort change) ---
+static RealmReport::MatchData g_CachedMatch;
+static uint64_t g_CachedDataVersion = 0;
+
+struct CachedFlatObj {
+    RealmReport::Objective obj;
+    std::string map_type;
+    std::string tag_display;   // pre-extracted "[TAG]" or ""
+    std::string flip_display;  // pre-formatted duration string
+};
+
+// Per-map cached lists (for grouped view)
+struct CachedMapData {
+    std::vector<CachedFlatObj> objs;
+    std::string map_type;
+};
+
+static std::vector<CachedFlatObj> g_CachedFlatList;
+static CachedMapData g_CachedMaps[4];
+static int g_CachedMapCount = 0;
+
+// Snapshot of state that triggers cache rebuild
+struct ListCacheKey {
+    uint64_t data_version = 0;
+    int sort_column = 0;
+    bool sort_ascending = true;
+    bool flat_list = false;
+    bool filter_ebg = true, filter_red = true, filter_blue = true, filter_green = true;
+    bool filter_camps = true, filter_towers = true, filter_keeps = true, filter_castles = true;
+    bool show_spawns = false, show_ruins = false;
+
+    bool operator!=(const ListCacheKey& o) const {
+        return data_version != o.data_version || sort_column != o.sort_column ||
+               sort_ascending != o.sort_ascending || flat_list != o.flat_list ||
+               filter_ebg != o.filter_ebg || filter_red != o.filter_red ||
+               filter_blue != o.filter_blue || filter_green != o.filter_green ||
+               filter_camps != o.filter_camps || filter_towers != o.filter_towers ||
+               filter_keeps != o.filter_keeps || filter_castles != o.filter_castles ||
+               show_spawns != o.show_spawns || show_ruins != o.show_ruins;
+    }
+};
+static ListCacheKey g_LastCacheKey;
 
 // --- Toast Notification System ---
 
@@ -311,6 +354,135 @@ static bool PassesTypeFilter(RealmReport::ObjectiveType type) {
     }
 }
 
+// --- Cache rebuild ---
+
+static std::string ExtractGuildTag(const std::string& claimed_by) {
+    size_t open = claimed_by.find('[');
+    size_t close = claimed_by.find(']');
+    if (open != std::string::npos && close != std::string::npos && close > open) {
+        return claimed_by.substr(open, close - open + 1);
+    }
+    return claimed_by;
+}
+
+static void SortCachedList(std::vector<CachedFlatObj>& objs, bool include_map_col) {
+    std::sort(objs.begin(), objs.end(), [include_map_col](const CachedFlatObj& fa, const CachedFlatObj& fb) -> bool {
+        const auto& a = fa.obj;
+        const auto& b = fb.obj;
+        int cmp = 0;
+        switch (g_SortColumn) {
+            case RealmReport::SortColumn::Map:
+                cmp = include_map_col ? fa.map_type.compare(fb.map_type) : 0;
+                break;
+            case RealmReport::SortColumn::Name:
+                cmp = a.name.compare(b.name);
+                break;
+            case RealmReport::SortColumn::Type: {
+                int ta = (int)a.type, tb = (int)b.type;
+                cmp = (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
+                break;
+            }
+            case RealmReport::SortColumn::Owner: {
+                int oa = (int)a.owner, ob = (int)b.owner;
+                cmp = (oa < ob) ? -1 : (oa > ob) ? 1 : 0;
+                break;
+            }
+            case RealmReport::SortColumn::TimeSinceFlip:
+                cmp = (a.seconds_since_flip < b.seconds_since_flip) ? -1 :
+                      (a.seconds_since_flip > b.seconds_since_flip) ? 1 : 0;
+                break;
+            case RealmReport::SortColumn::YaksDelivered:
+                cmp = (a.yaks_delivered < b.yaks_delivered) ? -1 :
+                      (a.yaks_delivered > b.yaks_delivered) ? 1 : 0;
+                break;
+            case RealmReport::SortColumn::ClaimedBy:
+                cmp = a.claimed_by.compare(b.claimed_by);
+                break;
+            case RealmReport::SortColumn::PPT:
+                cmp = (a.points_tick < b.points_tick) ? -1 :
+                      (a.points_tick > b.points_tick) ? 1 : 0;
+                break;
+            default:
+                cmp = (a.seconds_since_flip < b.seconds_since_flip) ? -1 :
+                      (a.seconds_since_flip > b.seconds_since_flip) ? 1 : 0;
+                break;
+        }
+        return g_SortAscending ? (cmp < 0) : (cmp > 0);
+    });
+}
+
+static CachedFlatObj MakeCachedObj(const RealmReport::Objective& obj, const std::string& map_type) {
+    CachedFlatObj c;
+    c.obj = obj;
+    c.map_type = map_type;
+    c.tag_display = obj.claimed_by.empty() ? "" : ExtractGuildTag(obj.claimed_by);
+    c.flip_display = FormatDuration(obj.seconds_since_flip);
+    return c;
+}
+
+static void RebuildObjectiveCache() {
+    ListCacheKey current;
+    current.data_version = g_CachedDataVersion;
+    current.sort_column = (int)g_SortColumn;
+    current.sort_ascending = g_SortAscending;
+    current.flat_list = g_FlatList;
+    current.filter_ebg = g_FilterEBG;
+    current.filter_red = g_FilterRedBL;
+    current.filter_blue = g_FilterBlueBL;
+    current.filter_green = g_FilterGreenBL;
+    current.filter_camps = g_FilterCamps;
+    current.filter_towers = g_FilterTowers;
+    current.filter_keeps = g_FilterKeeps;
+    current.filter_castles = g_FilterCastles;
+    current.show_spawns = g_ShowSpawns;
+    current.show_ruins = g_ShowRuins;
+
+    if (!(current != g_LastCacheKey)) return; // no change
+    g_LastCacheKey = current;
+
+    static const char* map_order[] = { "Center", "RedHome", "BlueHome", "GreenHome" };
+    static bool* map_filters[] = { &g_FilterEBG, &g_FilterRedBL, &g_FilterBlueBL, &g_FilterGreenBL };
+
+    if (g_FlatList) {
+        g_CachedFlatList.clear();
+        for (int m = 0; m < 4; m++) {
+            if (!*map_filters[m]) continue;
+            for (const auto& mp : g_CachedMatch.maps) {
+                if (mp.type != map_order[m]) continue;
+                for (const auto& obj : mp.objectives) {
+                    if (!PassesTypeFilter(obj.type)) continue;
+                    if (obj.name.empty()) continue;
+                    g_CachedFlatList.push_back(MakeCachedObj(obj, mp.type));
+                }
+            }
+        }
+        SortCachedList(g_CachedFlatList, true);
+    } else {
+        g_CachedMapCount = 0;
+        for (int m = 0; m < 4; m++) {
+            if (!*map_filters[m]) continue;
+            const RealmReport::WvWMap* wmap = nullptr;
+            for (const auto& mp : g_CachedMatch.maps) {
+                if (mp.type == map_order[m]) { wmap = &mp; break; }
+            }
+            if (!wmap) continue;
+
+            CachedMapData& cd = g_CachedMaps[g_CachedMapCount];
+            cd.map_type = wmap->type;
+            cd.objs.clear();
+            for (const auto& obj : wmap->objectives) {
+                if (!PassesTypeFilter(obj.type)) continue;
+                if (obj.name.empty()) continue;
+                cd.objs.push_back(MakeCachedObj(obj, wmap->type));
+            }
+            if (!cd.objs.empty()) {
+                SortCachedList(cd.objs, false);
+                g_CachedMapCount++;
+            }
+        }
+    }
+}
+
 // DLL entry point
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
@@ -462,50 +634,10 @@ static void RenderFilterBar() {
     TypeToggle("Castle", &g_FilterCastles, GetTypeBadgeColor(RealmReport::ObjectiveType::Castle));
 }
 
-// --- Objectives grouped by map ---
+// --- Render cached objective rows ---
 
-static void SortObjectives(std::vector<RealmReport::Objective>& objs) {
-    std::sort(objs.begin(), objs.end(), [](const RealmReport::Objective& a, const RealmReport::Objective& b) -> bool {
-        int cmp = 0;
-        switch (g_SortColumn) {
-            case RealmReport::SortColumn::Name:
-                cmp = a.name.compare(b.name);
-                break;
-            case RealmReport::SortColumn::Type: {
-                int ta = (int)a.type, tb = (int)b.type;
-                cmp = (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
-                break;
-            }
-            case RealmReport::SortColumn::Owner: {
-                int oa = (int)a.owner, ob = (int)b.owner;
-                cmp = (oa < ob) ? -1 : (oa > ob) ? 1 : 0;
-                break;
-            }
-            case RealmReport::SortColumn::TimeSinceFlip:
-                cmp = (a.seconds_since_flip < b.seconds_since_flip) ? -1 :
-                      (a.seconds_since_flip > b.seconds_since_flip) ? 1 : 0;
-                break;
-            case RealmReport::SortColumn::YaksDelivered:
-                cmp = (a.yaks_delivered < b.yaks_delivered) ? -1 :
-                      (a.yaks_delivered > b.yaks_delivered) ? 1 : 0;
-                break;
-            case RealmReport::SortColumn::ClaimedBy:
-                cmp = a.claimed_by.compare(b.claimed_by);
-                break;
-            case RealmReport::SortColumn::PPT:
-                cmp = (a.points_tick < b.points_tick) ? -1 :
-                      (a.points_tick > b.points_tick) ? 1 : 0;
-                break;
-            default:
-                cmp = (a.seconds_since_flip < b.seconds_since_flip) ? -1 :
-                      (a.seconds_since_flip > b.seconds_since_flip) ? 1 : 0;
-                break;
-        }
-        return g_SortAscending ? (cmp < 0) : (cmp > 0);
-    });
-}
-
-static void RenderObjectiveRow(ImDrawList* dl, const RealmReport::Objective& obj, int idx) {
+static void RenderCachedRow(ImDrawList* dl, const CachedFlatObj& c, int idx) {
+    const auto& obj = c.obj;
     ImGui::PushID(idx);
     ImGui::TableNextRow();
 
@@ -526,14 +658,9 @@ static void RenderObjectiveRow(ImDrawList* dl, const RealmReport::Objective& obj
         float dotR = 4.5f;
         float dotCY = cursorPos.y + fontSize * 0.5f;
 
-        // Owner dot
         DrawOwnerDot(dl, ImVec2(cursorPos.x + dotR + 1, dotCY), dotR, obj.owner);
-
-        // Type badge
         float badgeX = cursorPos.x + dotR * 2 + 6;
         DrawTypeBadge(dl, ImVec2(badgeX, cursorPos.y), obj.type);
-
-        // Name text
         float nameX = badgeX + fontSize + 4;
         ImGui::SetCursorScreenPos(ImVec2(nameX, cursorPos.y));
         ImGui::Text("%s", obj.name.c_str());
@@ -549,14 +676,13 @@ static void RenderObjectiveRow(ImDrawList* dl, const RealmReport::Objective& obj
         if (obj.points_capture > 0) ImGui::Text("Capture: +%d", obj.points_capture);
         if (obj.yaks_delivered > 0) ImGui::Text("Yaks: %d  (Tier %d)", obj.yaks_delivered, obj.upgrade_tier);
         if (!obj.claimed_by.empty()) ImGui::Text("Claimed: %s", obj.claimed_by.c_str());
-        if (obj.seconds_since_flip >= 0) ImGui::Text("Flipped: %s ago", FormatDuration(obj.seconds_since_flip).c_str());
+        if (obj.seconds_since_flip >= 0) ImGui::Text("Flipped: %s ago", c.flip_display.c_str());
         ImGui::EndTooltip();
     }
 
-    // --- Column 2: Flipped ---
+    // --- Column 2: Flipped (pre-computed) ---
     ImGui::TableNextColumn();
-    ImGui::TextColored(GetFlipTimeColor(obj.seconds_since_flip), "%s",
-        FormatDuration(obj.seconds_since_flip).c_str());
+    ImGui::TextColored(GetFlipTimeColor(obj.seconds_since_flip), "%s", c.flip_display.c_str());
 
     // --- Column 3: Tier ---
     ImGui::TableNextColumn();
@@ -569,17 +695,10 @@ static void RenderObjectiveRow(ImDrawList* dl, const RealmReport::Objective& obj
         ImGui::TextColored(ImVec4(0.3f, 0.3f, 0.3f, 1.0f), "-");
     }
 
-    // --- Column 4: Claimed (tag only, full name in tooltip) ---
+    // --- Column 4: Claimed (pre-extracted tag) ---
     ImGui::TableNextColumn();
     if (!obj.claimed_by.empty()) {
-        // Extract tag from "[TAG] Name" format
-        std::string display = obj.claimed_by;
-        size_t open = obj.claimed_by.find('[');
-        size_t close = obj.claimed_by.find(']');
-        if (open != std::string::npos && close != std::string::npos && close > open) {
-            display = obj.claimed_by.substr(open, close - open + 1);
-        }
-        ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", display.c_str());
+        ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", c.tag_display.c_str());
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::Text("%s", obj.claimed_by.c_str());
@@ -592,7 +711,8 @@ static void RenderObjectiveRow(ImDrawList* dl, const RealmReport::Objective& obj
     ImGui::PopID();
 }
 
-static void RenderObjectiveRowFlat(ImDrawList* dl, const RealmReport::Objective& obj, const std::string& map_type, int idx) {
+static void RenderCachedRowFlat(ImDrawList* dl, const CachedFlatObj& c, int idx) {
+    const auto& obj = c.obj;
     ImGui::PushID(idx);
     ImGui::TableNextRow();
 
@@ -606,10 +726,10 @@ static void RenderObjectiveRowFlat(ImDrawList* dl, const RealmReport::Objective&
 
     // Map column
     ImGui::TableNextColumn();
-    ImVec4 mapCol = GetMapHeaderColor(map_type);
-    ImGui::TextColored(mapCol, "%s", MapShortName(map_type));
+    ImVec4 mapCol = GetMapHeaderColor(c.map_type);
+    ImGui::TextColored(mapCol, "%s", MapShortName(c.map_type));
 
-    // Objective column (same as RenderObjectiveRow column 1)
+    // Objective column
     ImGui::TableNextColumn();
     {
         ImVec2 cursorPos = ImGui::GetCursorScreenPos();
@@ -632,14 +752,13 @@ static void RenderObjectiveRowFlat(ImDrawList* dl, const RealmReport::Objective&
         if (obj.points_capture > 0) ImGui::Text("Capture: +%d", obj.points_capture);
         if (obj.yaks_delivered > 0) ImGui::Text("Yaks: %d  (Tier %d)", obj.yaks_delivered, obj.upgrade_tier);
         if (!obj.claimed_by.empty()) ImGui::Text("Claimed: %s", obj.claimed_by.c_str());
-        if (obj.seconds_since_flip >= 0) ImGui::Text("Flipped: %s ago", FormatDuration(obj.seconds_since_flip).c_str());
+        if (obj.seconds_since_flip >= 0) ImGui::Text("Flipped: %s ago", c.flip_display.c_str());
         ImGui::EndTooltip();
     }
 
-    // Flipped
+    // Flipped (pre-computed)
     ImGui::TableNextColumn();
-    ImGui::TextColored(GetFlipTimeColor(obj.seconds_since_flip), "%s",
-        FormatDuration(obj.seconds_since_flip).c_str());
+    ImGui::TextColored(GetFlipTimeColor(obj.seconds_since_flip), "%s", c.flip_display.c_str());
 
     // Tier
     ImGui::TableNextColumn();
@@ -652,16 +771,10 @@ static void RenderObjectiveRowFlat(ImDrawList* dl, const RealmReport::Objective&
         ImGui::TextColored(ImVec4(0.3f, 0.3f, 0.3f, 1.0f), "-");
     }
 
-    // Claimed
+    // Claimed (pre-extracted tag)
     ImGui::TableNextColumn();
     if (!obj.claimed_by.empty()) {
-        std::string display = obj.claimed_by;
-        size_t open = obj.claimed_by.find('[');
-        size_t close = obj.claimed_by.find(']');
-        if (open != std::string::npos && close != std::string::npos && close > open) {
-            display = obj.claimed_by.substr(open, close - open + 1);
-        }
-        ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", display.c_str());
+        ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "%s", c.tag_display.c_str());
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::Text("%s", obj.claimed_by.c_str());
@@ -674,160 +787,68 @@ static void RenderObjectiveRowFlat(ImDrawList* dl, const RealmReport::Objective&
     ImGui::PopID();
 }
 
-struct FlatObjective {
-    RealmReport::Objective obj;
-    std::string map_type;
-};
-
-static void SortFlatObjectives(std::vector<FlatObjective>& objs) {
-    std::sort(objs.begin(), objs.end(), [](const FlatObjective& fa, const FlatObjective& fb) -> bool {
-        const auto& a = fa.obj;
-        const auto& b = fb.obj;
-        int cmp = 0;
-        switch (g_SortColumn) {
-            case RealmReport::SortColumn::Map:
-                cmp = fa.map_type.compare(fb.map_type);
-                break;
-            case RealmReport::SortColumn::Name:
-                cmp = a.name.compare(b.name);
-                break;
-            case RealmReport::SortColumn::Type: {
-                int ta = (int)a.type, tb = (int)b.type;
-                cmp = (ta < tb) ? -1 : (ta > tb) ? 1 : 0;
-                break;
-            }
-            case RealmReport::SortColumn::Owner: {
-                int oa = (int)a.owner, ob = (int)b.owner;
-                cmp = (oa < ob) ? -1 : (oa > ob) ? 1 : 0;
-                break;
-            }
-            case RealmReport::SortColumn::TimeSinceFlip:
-                cmp = (a.seconds_since_flip < b.seconds_since_flip) ? -1 :
-                      (a.seconds_since_flip > b.seconds_since_flip) ? 1 : 0;
-                break;
-            case RealmReport::SortColumn::YaksDelivered:
-                cmp = (a.yaks_delivered < b.yaks_delivered) ? -1 :
-                      (a.yaks_delivered > b.yaks_delivered) ? 1 : 0;
-                break;
-            case RealmReport::SortColumn::ClaimedBy:
-                cmp = a.claimed_by.compare(b.claimed_by);
-                break;
-            case RealmReport::SortColumn::PPT:
-                cmp = (a.points_tick < b.points_tick) ? -1 :
-                      (a.points_tick > b.points_tick) ? 1 : 0;
-                break;
-            default:
-                cmp = (a.seconds_since_flip < b.seconds_since_flip) ? -1 :
-                      (a.seconds_since_flip > b.seconds_since_flip) ? 1 : 0;
-                break;
+// Handle sort spec changes from ImGui table headers
+static void HandleSortSpecs() {
+    if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
+        if (specs->SpecsDirty && specs->SpecsCount > 0) {
+            g_SortColumn = (RealmReport::SortColumn)specs->Specs[0].ColumnUserID;
+            g_SortAscending = (specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
+            specs->SpecsDirty = false;
+            RealmReport::WvWAPI::SetSortState((int)g_SortColumn, g_SortAscending);
+            RealmReport::WvWAPI::SaveSelectedWorld();
         }
-        return g_SortAscending ? (cmp < 0) : (cmp > 0);
-    });
-}
-
-static void RenderFlatObjectivesTable(const RealmReport::MatchData& match) {
-    if (match.maps.empty()) return;
-
-    static const char* map_order[] = { "Center", "RedHome", "BlueHome", "GreenHome" };
-    static bool* map_filters[] = { &g_FilterEBG, &g_FilterRedBL, &g_FilterBlueBL, &g_FilterGreenBL };
-
-    // Collect all objectives from enabled maps
-    std::vector<FlatObjective> all;
-    for (int m = 0; m < 4; m++) {
-        if (!*map_filters[m]) continue;
-        for (const auto& mp : match.maps) {
-            if (mp.type != map_order[m]) continue;
-            for (const auto& obj : mp.objectives) {
-                if (!PassesTypeFilter(obj.type)) continue;
-                if (obj.name.empty()) continue;
-                all.push_back({obj, mp.type});
-            }
-        }
-    }
-    if (all.empty()) return;
-
-    SortFlatObjectives(all);
-
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
-                            ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
-                            ImGuiTableFlags_NoPadOuterX;
-
-    if (ImGui::BeginTable("##obj_flat", 5, flags)) {
-        auto ColFlags = [](RealmReport::SortColumn col) -> ImGuiTableColumnFlags {
-            return (g_SortColumn == col) ? ImGuiTableColumnFlags_DefaultSort : (ImGuiTableColumnFlags)0;
-        };
-        ImGui::TableSetupColumn("Map",       ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::Map), 50.0f, (ImGuiID)RealmReport::SortColumn::Map);
-        ImGui::TableSetupColumn("Objective", ImGuiTableColumnFlags_WidthStretch | ColFlags(RealmReport::SortColumn::Name), 3.0f, (ImGuiID)RealmReport::SortColumn::Name);
-        ImGui::TableSetupColumn("Flipped",   ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::TimeSinceFlip), 55.0f, (ImGuiID)RealmReport::SortColumn::TimeSinceFlip);
-        ImGui::TableSetupColumn("Tier",      ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::YaksDelivered), 38.0f, (ImGuiID)RealmReport::SortColumn::YaksDelivered);
-        ImGui::TableSetupColumn("Claimed",   ImGuiTableColumnFlags_WidthStretch | ColFlags(RealmReport::SortColumn::ClaimedBy), 1.5f, (ImGuiID)RealmReport::SortColumn::ClaimedBy);
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableHeadersRow();
-
-        if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
-            if (specs->SpecsDirty && specs->SpecsCount > 0) {
-                g_SortColumn = (RealmReport::SortColumn)specs->Specs[0].ColumnUserID;
-                g_SortAscending = (specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
-                specs->SpecsDirty = false;
-                SortFlatObjectives(all);
-                RealmReport::WvWAPI::SetSortState((int)g_SortColumn, g_SortAscending);
-                RealmReport::WvWAPI::SaveSelectedWorld();
-            }
-        }
-
-        for (int i = 0; i < (int)all.size(); i++) {
-            RenderObjectiveRowFlat(dl, all[i].obj, all[i].map_type, i);
-        }
-
-        ImGui::EndTable();
     }
 }
 
-static void RenderObjectivesTable(const RealmReport::MatchData& match) {
-    if (match.maps.empty()) return;
+static void RenderObjectivesTable() {
+    if (g_CachedMatch.maps.empty()) return;
 
     if (g_FlatList) {
-        RenderFlatObjectivesTable(match);
+        // Flat list view — render from cached flat list
+        if (g_CachedFlatList.empty()) return;
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
+                                ImGuiTableFlags_NoPadOuterX;
+
+        if (ImGui::BeginTable("##obj_flat", 5, flags)) {
+            auto ColFlags = [](RealmReport::SortColumn col) -> ImGuiTableColumnFlags {
+                return (g_SortColumn == col) ? ImGuiTableColumnFlags_DefaultSort : (ImGuiTableColumnFlags)0;
+            };
+            ImGui::TableSetupColumn("Map",       ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::Map), 50.0f, (ImGuiID)RealmReport::SortColumn::Map);
+            ImGui::TableSetupColumn("Objective", ImGuiTableColumnFlags_WidthStretch | ColFlags(RealmReport::SortColumn::Name), 3.0f, (ImGuiID)RealmReport::SortColumn::Name);
+            ImGui::TableSetupColumn("Flipped",   ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::TimeSinceFlip), 55.0f, (ImGuiID)RealmReport::SortColumn::TimeSinceFlip);
+            ImGui::TableSetupColumn("Tier",      ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::YaksDelivered), 38.0f, (ImGuiID)RealmReport::SortColumn::YaksDelivered);
+            ImGui::TableSetupColumn("Claimed",   ImGuiTableColumnFlags_WidthStretch | ColFlags(RealmReport::SortColumn::ClaimedBy), 1.5f, (ImGuiID)RealmReport::SortColumn::ClaimedBy);
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+
+            HandleSortSpecs();
+
+            for (int i = 0; i < (int)g_CachedFlatList.size(); i++) {
+                RenderCachedRowFlat(dl, g_CachedFlatList[i], i);
+            }
+
+            ImGui::EndTable();
+        }
         return;
     }
 
-    // Map display order
-    static const char* map_order[] = { "Center", "RedHome", "BlueHome", "GreenHome" };
-    static bool* map_filters[] = { &g_FilterEBG, &g_FilterRedBL, &g_FilterBlueBL, &g_FilterGreenBL };
-
+    // Grouped view — render from cached per-map lists
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    for (int m = 0; m < 4; m++) {
-        if (!*map_filters[m]) continue;
-
-        // Find the map data
-        const RealmReport::WvWMap* wmap = nullptr;
-        for (const auto& mp : match.maps) {
-            if (mp.type == map_order[m]) { wmap = &mp; break; }
-        }
-        if (!wmap) continue;
-
-        // Filter objectives
-        std::vector<RealmReport::Objective> filtered;
-        for (const auto& obj : wmap->objectives) {
-            if (!PassesTypeFilter(obj.type)) continue;
-            if (obj.name.empty()) continue;
-            filtered.push_back(obj);
-        }
-        if (filtered.empty()) continue;
-
-        SortObjectives(filtered);
+    for (int m = 0; m < g_CachedMapCount; m++) {
+        const CachedMapData& cd = g_CachedMaps[m];
 
         // Colored collapsing header per map
-        ImVec4 hdrColor = GetMapHeaderColor(wmap->type);
+        ImVec4 hdrColor = GetMapHeaderColor(cd.map_type);
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(hdrColor.x, hdrColor.y, hdrColor.z, 0.20f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(hdrColor.x, hdrColor.y, hdrColor.z, 0.35f));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(hdrColor.x, hdrColor.y, hdrColor.z, 0.45f));
 
         char hdr_label[64];
-        snprintf(hdr_label, sizeof(hdr_label), "%s  (%d)", MapShortName(wmap->type), (int)filtered.size());
+        snprintf(hdr_label, sizeof(hdr_label), "%s  (%d)", MapShortName(cd.map_type), (int)cd.objs.size());
 
         bool open = ImGui::CollapsingHeader(hdr_label, ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopStyleColor(3);
@@ -853,20 +874,10 @@ static void RenderObjectivesTable(const RealmReport::MatchData& match) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableHeadersRow();
 
-            // Handle sort specs
-            if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
-                if (specs->SpecsDirty && specs->SpecsCount > 0) {
-                    g_SortColumn = (RealmReport::SortColumn)specs->Specs[0].ColumnUserID;
-                    g_SortAscending = (specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
-                    specs->SpecsDirty = false;
-                    SortObjectives(filtered);
-                    RealmReport::WvWAPI::SetSortState((int)g_SortColumn, g_SortAscending);
-                    RealmReport::WvWAPI::SaveSelectedWorld();
-                }
-            }
+            HandleSortSpecs();
 
-            for (int i = 0; i < (int)filtered.size(); i++) {
-                RenderObjectiveRow(dl, filtered[i], m * 100 + i);
+            for (int i = 0; i < (int)cd.objs.size(); i++) {
+                RenderCachedRow(dl, cd.objs[i], m * 100 + i);
             }
 
             ImGui::EndTable();
@@ -1320,10 +1331,18 @@ void AddonRender() {
     float statusBarH = ImGui::GetFrameHeightWithSpacing() + 4;
 
     if (RealmReport::WvWAPI::HasMatchData()) {
-        RealmReport::MatchData match = RealmReport::WvWAPI::GetMatchData();
+        // Update cached match data only when a new fetch arrives
+        uint64_t ver = RealmReport::WvWAPI::GetDataVersion();
+        if (ver != g_CachedDataVersion) {
+            g_CachedMatch = RealmReport::WvWAPI::GetMatchData();
+            g_CachedDataVersion = ver;
+        }
+
+        // Rebuild filtered/sorted lists only when data, filters, or sort change
+        RebuildObjectiveCache();
 
         // Scoreboard
-        RenderScoreboard(match);
+        RenderScoreboard(g_CachedMatch);
 
         // Filter bar + map toggles on same line
         RenderFilterBar();
@@ -1361,7 +1380,7 @@ void AddonRender() {
         if (scrollH < 50) scrollH = 50;
         ImGuiWindowFlags scrollFlags = g_WindowPinned ? ImGuiWindowFlags_NoInputs : 0;
         ImGui::BeginChild("##obj_scroll", ImVec2(0, scrollH), false, scrollFlags);
-        RenderObjectivesTable(match);
+        RenderObjectivesTable();
         ImGui::EndChild();
     } else if (RealmReport::WvWAPI::GetSelectedWorld() > 0) {
         ImGui::Spacing();

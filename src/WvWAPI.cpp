@@ -96,6 +96,7 @@ namespace RealmReport {
     int WvWAPI::s_sort_column = (int)SortColumn::TimeSinceFlip;
     bool WvWAPI::s_sort_ascending = true;
     float WvWAPI::s_pinned_opacity = 0.6f;
+    std::atomic<uint64_t> WvWAPI::s_data_version{0};
 
     // --- Helper: get DLL directory ---
 
@@ -856,6 +857,7 @@ namespace RealmReport {
                 std::lock_guard<std::mutex> lock(s_mutex);
                 s_match_data = match;
                 s_has_match_data.store(true);
+                s_data_version.fetch_add(1);
 
                 s_last_fetch_time = std::chrono::steady_clock::now();
                 s_status_message = "Ready";
@@ -939,6 +941,10 @@ namespace RealmReport {
 
     bool WvWAPI::HasMatchData() {
         return s_has_match_data.load();
+    }
+
+    uint64_t WvWAPI::GetDataVersion() {
+        return s_data_version.load();
     }
 
     const std::string& WvWAPI::GetStatusMessage() {

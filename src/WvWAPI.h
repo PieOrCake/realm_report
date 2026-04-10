@@ -127,6 +127,7 @@ namespace RealmReport {
         // Get current match data (thread-safe copy)
         static MatchData GetMatchData();
         static bool HasMatchData();
+        static uint64_t GetDataVersion();
 
         // Manually trigger a fetch (for immediate refresh)
         static void FetchNow();
@@ -222,6 +223,7 @@ namespace RealmReport {
         static int s_sort_column;
         static bool s_sort_ascending;
         static float s_pinned_opacity;
+        static std::atomic<uint64_t> s_data_version;
     };
 
     // Utility
