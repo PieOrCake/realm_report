@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 #include <atomic>
 #include <chrono>
@@ -140,6 +141,7 @@ namespace RealmReport {
         static void SetPollIntervalSeconds(int seconds);
         static int GetPollIntervalSeconds();
         static int GetSecondsUntilNextRefresh();
+        static int GetSecondsSinceLastFetch();
 
         // Flip notifications setting
         static void SetFlipNotifications(bool enabled);
@@ -174,6 +176,18 @@ namespace RealmReport {
 
         // Flip events
         static std::vector<FlipEvent> PopFlipEvents();
+
+        // Pinned objectives (persisted)
+        static void SetPinnedObjectives(const std::unordered_set<std::string>& ids);
+        static std::unordered_set<std::string> GetPinnedObjectives();
+
+        // Quick access icon
+        static void SetShowQuickAccess(bool enabled);
+        static bool GetShowQuickAccess();
+
+        // Nearest waypoint lookup (computed from map coordinates)
+        static int  GetNearestWaypointId(const std::string& obj_id);
+        static bool IsWaypointConditional(int waypoint_id);
 
     private:
         static void DetectFlips(const MatchData& old_data, const MatchData& new_data);
@@ -224,6 +238,8 @@ namespace RealmReport {
         static bool s_sort_ascending;
         static float s_pinned_opacity;
         static std::atomic<uint64_t> s_data_version;
+        static std::unordered_set<std::string> s_pinned_objectives;
+        static bool s_show_quick_access;
     };
 
     // Utility

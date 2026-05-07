@@ -4,3 +4,7 @@ lib/
 *.lib
 *.o
 *.obj
+src/rr_icon_data.h
+src/rr_icon_hover_data.h
+CLAUDE.md
+handover.md

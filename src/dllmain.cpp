@@ -3,6 +3,7 @@
 #include <mmsystem.h>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <cstring>
 #include <sstream>
 #include <algorithm>
@@ -12,12 +13,14 @@
 #include "nexus/Nexus.h"
 #include "imgui.h"
 #include "WvWAPI.h"
+#include "rr_icon_data.h"
+#include "rr_icon_hover_data.h"
 
 // Version constants
 #define V_MAJOR 0
 #define V_MINOR 9
-#define V_BUILD 1
-#define V_REVISION 2
+#define V_BUILD 2
+#define V_REVISION 0
 
 
 // --- Mumble Link structures (minimal, for map type detection) ---
@@ -80,6 +83,13 @@ AddonDefinition_t AddonDef{};
 AddonAPI_t* APIDefs = nullptr;
 bool g_WindowVisible = false;
 static bool g_IsOnWvWMap = false;
+static bool g_ShowQuickAccess = true;
+
+// Stale-data banner state
+static bool  g_ApiStale                                   = false;
+static std::chrono::steady_clock::time_point g_ApiRecoveredAt{};
+static const int   STALE_THRESHOLD_SECS                   = 300;
+static const float RECOVERY_BANNER_SECS                   = 5.0f;
 
 // UI State
 static int g_WorldComboIndex = -1;
@@ -127,6 +137,11 @@ static std::vector<CachedFlatObj> g_CachedFlatList;
 static CachedMapData g_CachedMaps[4];
 static int g_CachedMapCount = 0;
 
+// --- Pinned objectives ---
+static std::unordered_set<std::string> g_PinnedObjectiveIds;
+static std::vector<CachedFlatObj>       g_CachedPinnedList;
+static int                              g_PinnedVersion = 0;
+
 // Snapshot of state that triggers cache rebuild
 struct ListCacheKey {
     uint64_t data_version = 0;
@@ -136,6 +151,7 @@ struct ListCacheKey {
     bool filter_ebg = true, filter_red = true, filter_blue = true, filter_green = true;
     bool filter_camps = true, filter_towers = true, filter_keeps = true, filter_castles = true;
     bool show_spawns = false, show_ruins = false;
+    int pinned_version = 0;
 
     bool operator!=(const ListCacheKey& o) const {
         return data_version != o.data_version || sort_column != o.sort_column ||
@@ -144,7 +160,8 @@ struct ListCacheKey {
                filter_blue != o.filter_blue || filter_green != o.filter_green ||
                filter_camps != o.filter_camps || filter_towers != o.filter_towers ||
                filter_keeps != o.filter_keeps || filter_castles != o.filter_castles ||
-               show_spawns != o.show_spawns || show_ruins != o.show_ruins;
+               show_spawns != o.show_spawns || show_ruins != o.show_ruins ||
+               pinned_version != o.pinned_version;
     }
 };
 static ListCacheKey g_LastCacheKey;
@@ -356,6 +373,33 @@ static bool PassesTypeFilter(RealmReport::ObjectiveType type) {
 
 // --- Cache rebuild ---
 
+static void CopyToClipboard(const std::string& text) {
+    if (!OpenClipboard(nullptr)) return;
+    EmptyClipboard();
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
+    if (!hg) { CloseClipboard(); return; }
+    memcpy(GlobalLock(hg), text.c_str(), text.size() + 1);
+    GlobalUnlock(hg);
+    SetClipboardData(CF_TEXT, hg);
+    CloseClipboard();
+}
+
+// GW2 chat link format for waypoints: [0x04, id_lo, id_mid, id_hi, 0x00], base64 in [&…]
+static std::string WaypointChatLink(int id) {
+    static const char* b64 =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    uint8_t b[5] = {0x04, (uint8_t)id, (uint8_t)(id >> 8), (uint8_t)(id >> 16), 0x00};
+    char out[16];
+    uint32_t g1 = ((uint32_t)b[0] << 16) | ((uint32_t)b[1] << 8) | b[2];
+    uint32_t g2 = ((uint32_t)b[3] << 16) | ((uint32_t)b[4] << 8);
+    out[0] = '['; out[1] = '&';
+    out[2] = b64[(g1 >> 18) & 63]; out[3] = b64[(g1 >> 12) & 63];
+    out[4] = b64[(g1 >>  6) & 63]; out[5] = b64[ g1        & 63];
+    out[6] = b64[(g2 >> 18) & 63]; out[7] = b64[(g2 >> 12) & 63];
+    out[8] = b64[(g2 >>  6) & 63]; out[9] = '='; out[10] = ']'; out[11] = '\0';
+    return std::string(out);
+}
+
 static std::string ExtractGuildTag(const std::string& claimed_by) {
     size_t open = claimed_by.find('[');
     size_t close = claimed_by.find(']');
@@ -436,9 +480,24 @@ static void RebuildObjectiveCache() {
     current.filter_castles = g_FilterCastles;
     current.show_spawns = g_ShowSpawns;
     current.show_ruins = g_ShowRuins;
+    current.pinned_version = g_PinnedVersion;
 
     if (!(current != g_LastCacheKey)) return; // no change
     g_LastCacheKey = current;
+
+    // Build pinned list (respects type filters but not map filters)
+    g_CachedPinnedList.clear();
+    if (!g_PinnedObjectiveIds.empty()) {
+        for (const auto& mp : g_CachedMatch.maps) {
+            for (const auto& obj : mp.objectives) {
+                if (!g_PinnedObjectiveIds.count(obj.id)) continue;
+                if (!PassesTypeFilter(obj.type)) continue;
+                if (obj.name.empty()) continue;
+                g_CachedPinnedList.push_back(MakeCachedObj(obj, mp.type));
+            }
+        }
+        SortCachedList(g_CachedPinnedList, true);
+    }
 
     static const char* map_order[] = { "Center", "RedHome", "BlueHome", "GreenHome" };
     static bool* map_filters[] = { &g_FilterEBG, &g_FilterRedBL, &g_FilterBlueBL, &g_FilterGreenBL };
@@ -634,6 +693,15 @@ static void RenderFilterBar() {
     TypeToggle("Castle", &g_FilterCastles, GetTypeBadgeColor(RealmReport::ObjectiveType::Castle));
 }
 
+// Returns a descriptive tooltip for conditional waypoints.
+// Keep WPs require Tier 3 (Fortified, 80 yaks); SMC requires Tier 3 (100 yaks).
+// All are also unavailable while the objective is contested.
+static const char* WaypointConditionTooltip(int waypoint_id) {
+    if (waypoint_id == 1213) // Stonemist Castle (EBG)
+        return "Requires Tier 3 (Fortified, 100 yaks)\nand not contested";
+    return "Requires Tier 3 (Fortified, 80 yaks)\nand not contested";
+}
+
 // --- Render cached objective rows ---
 
 static void RenderCachedRow(ImDrawList* dl, const CachedFlatObj& c, int idx) {
@@ -653,6 +721,36 @@ static void RenderCachedRow(ImDrawList* dl, const CachedFlatObj& c, int idx) {
     // --- Column 1: [dot] [badge] Name ---
     ImGui::TableNextColumn();
     {
+        // Row-spanning selectable as context-menu target
+        ImVec2 rowStart = ImGui::GetCursorScreenPos();
+        ImGui::Selectable("##row_sel", false,
+            ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap,
+            ImVec2(0, ImGui::GetFrameHeight()));
+        ImGui::SetItemAllowOverlap();
+        if (ImGui::BeginPopupContextItem("##ctx")) {
+            bool pinned = g_PinnedObjectiveIds.count(obj.id) > 0;
+            if (ImGui::MenuItem(pinned ? "Unpin" : "Pin to top")) {
+                if (pinned) g_PinnedObjectiveIds.erase(obj.id);
+                else        g_PinnedObjectiveIds.insert(obj.id);
+                g_PinnedVersion++;
+                RealmReport::WvWAPI::SetPinnedObjectives(g_PinnedObjectiveIds);
+                RealmReport::WvWAPI::SaveSelectedWorld();
+            }
+            int wp = RealmReport::WvWAPI::GetNearestWaypointId(obj.id);
+            if (wp > 0) {
+                if (ImGui::MenuItem("Nearest Waypoint")) {
+                    CopyToClipboard(WaypointChatLink(wp));
+                }
+                if (ImGui::IsItemHovered() && RealmReport::WvWAPI::IsWaypointConditional(wp)) {
+                    ImGui::SetTooltip("%s", WaypointConditionTooltip(wp));
+                }
+            } else {
+                ImGui::TextDisabled("No waypoint data");
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SetCursorScreenPos(rowStart);
+
         ImVec2 cursorPos = ImGui::GetCursorScreenPos();
         float fontSize = ImGui::GetFontSize();
         float dotR = 4.5f;
@@ -724,8 +822,38 @@ static void RenderCachedRowFlat(ImDrawList* dl, const CachedFlatObj& c, int idx)
             ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 0.8f, 0.2f, 0.06f)));
     }
 
-    // Map column
+    // Map column — also houses the row-spanning selectable for the context menu
     ImGui::TableNextColumn();
+    {
+        ImVec2 rowStart = ImGui::GetCursorScreenPos();
+        ImGui::Selectable("##row_sel", false,
+            ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap,
+            ImVec2(0, ImGui::GetFrameHeight()));
+        ImGui::SetItemAllowOverlap();
+        if (ImGui::BeginPopupContextItem("##ctx")) {
+            bool pinned = g_PinnedObjectiveIds.count(obj.id) > 0;
+            if (ImGui::MenuItem(pinned ? "Unpin" : "Pin to top")) {
+                if (pinned) g_PinnedObjectiveIds.erase(obj.id);
+                else        g_PinnedObjectiveIds.insert(obj.id);
+                g_PinnedVersion++;
+                RealmReport::WvWAPI::SetPinnedObjectives(g_PinnedObjectiveIds);
+                RealmReport::WvWAPI::SaveSelectedWorld();
+            }
+            int wp = RealmReport::WvWAPI::GetNearestWaypointId(obj.id);
+            if (wp > 0) {
+                if (ImGui::MenuItem("Nearest Waypoint")) {
+                    CopyToClipboard(WaypointChatLink(wp));
+                }
+                if (ImGui::IsItemHovered() && RealmReport::WvWAPI::IsWaypointConditional(wp)) {
+                    ImGui::SetTooltip("%s", WaypointConditionTooltip(wp));
+                }
+            } else {
+                ImGui::TextDisabled("No waypoint data");
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SetCursorScreenPos(rowStart);
+    }
     ImVec4 mapCol = GetMapHeaderColor(c.map_type);
     ImGui::TextColored(mapCol, "%s", MapShortName(c.map_type));
 
@@ -800,10 +928,52 @@ static void HandleSortSpecs() {
     }
 }
 
+static void RenderPinnedSection(ImDrawList* dl) {
+    if (g_CachedPinnedList.empty()) return;
+
+    ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0.75f, 0.65f, 0.20f, 0.20f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.75f, 0.65f, 0.20f, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0.75f, 0.65f, 0.20f, 0.45f));
+
+    char lbl[32];
+    snprintf(lbl, sizeof(lbl), "Pinned  (%d)", (int)g_CachedPinnedList.size());
+    bool open = ImGui::CollapsingHeader(lbl, ImGuiTreeNodeFlags_DefaultOpen);
+    ImGui::PopStyleColor(3);
+
+    if (open) {
+        ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
+                                ImGuiTableFlags_NoPadOuterX;
+        if (ImGui::BeginTable("##obj_pinned", 5, flags)) {
+            auto ColFlags = [](RealmReport::SortColumn col) -> ImGuiTableColumnFlags {
+                return (g_SortColumn == col) ? ImGuiTableColumnFlags_DefaultSort : (ImGuiTableColumnFlags)0;
+            };
+            ImGui::TableSetupColumn("Map",       ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::Map), 50.0f, (ImGuiID)RealmReport::SortColumn::Map);
+            ImGui::TableSetupColumn("Objective", ImGuiTableColumnFlags_WidthStretch | ColFlags(RealmReport::SortColumn::Name), 3.0f, (ImGuiID)RealmReport::SortColumn::Name);
+            ImGui::TableSetupColumn("Flipped",   ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::TimeSinceFlip), 55.0f, (ImGuiID)RealmReport::SortColumn::TimeSinceFlip);
+            ImGui::TableSetupColumn("Tier",      ImGuiTableColumnFlags_WidthFixed | ColFlags(RealmReport::SortColumn::YaksDelivered), 38.0f, (ImGuiID)RealmReport::SortColumn::YaksDelivered);
+            ImGui::TableSetupColumn("Claimed",   ImGuiTableColumnFlags_WidthStretch | ColFlags(RealmReport::SortColumn::ClaimedBy), 1.5f, (ImGuiID)RealmReport::SortColumn::ClaimedBy);
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+            HandleSortSpecs();
+            for (int i = 0; i < (int)g_CachedPinnedList.size(); i++) {
+                RenderCachedRowFlat(dl, g_CachedPinnedList[i], 9000 + i);
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::Spacing();
+}
+
 static void RenderObjectivesTable() {
     if (g_CachedMatch.maps.empty()) return;
 
+    ImDrawList* dl_outer = ImGui::GetWindowDrawList();
+
     if (g_FlatList) {
+        // Pinned section at top (flat view uses flat row format)
+        RenderPinnedSection(dl_outer);
+
         // Flat list view — render from cached flat list
         if (g_CachedFlatList.empty()) return;
 
@@ -836,7 +1006,10 @@ static void RenderObjectivesTable() {
     }
 
     // Grouped view — render from cached per-map lists
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImDrawList* dl = dl_outer;
+
+    // Pinned section always appears above map sections
+    RenderPinnedSection(dl);
 
     for (int m = 0; m < g_CachedMapCount; m++) {
         const CachedMapData& cd = g_CachedMaps[m];
@@ -886,6 +1059,119 @@ static void RenderObjectivesTable() {
     }
 }
 
+// --- GW2-Themed UI Style ---
+
+static ImGuiStyle g_GW2Style;
+static std::vector<ImGuiStyle> g_StyleStack;
+
+static void PushGW2Theme() {
+    g_StyleStack.push_back(ImGui::GetStyle());
+    ImGui::GetStyle() = g_GW2Style;
+}
+
+static void PopGW2Theme() {
+    if (!g_StyleStack.empty()) {
+        ImGui::GetStyle() = g_StyleStack.back();
+        g_StyleStack.pop_back();
+    }
+}
+
+struct ThemeGuard {
+    ThemeGuard()  { PushGW2Theme(); }
+    ~ThemeGuard() { PopGW2Theme(); }
+};
+
+static void BuildGW2Theme() {
+    g_GW2Style = ImGui::GetStyle();
+    ImGuiStyle& s = g_GW2Style;
+
+    s.WindowRounding    = 6.0f;
+    s.ChildRounding     = 4.0f;
+    s.FrameRounding     = 4.0f;
+    s.PopupRounding     = 4.0f;
+    s.ScrollbarRounding = 6.0f;
+    s.GrabRounding      = 3.0f;
+    s.TabRounding       = 4.0f;
+
+    s.WindowPadding     = ImVec2(10, 10);
+    s.FramePadding      = ImVec2(6, 4);
+    s.ItemSpacing       = ImVec2(8, 5);
+    s.ItemInnerSpacing  = ImVec2(6, 4);
+    s.ScrollbarSize     = 12.0f;
+    s.GrabMinSize       = 8.0f;
+    s.WindowBorderSize  = 1.0f;
+    s.ChildBorderSize   = 1.0f;
+    s.PopupBorderSize   = 1.0f;
+    s.FrameBorderSize   = 0.0f;
+    s.TabBorderSize     = 0.0f;
+
+    ImVec4* c = s.Colors;
+
+    c[ImGuiCol_WindowBg]             = ImVec4(0.08f, 0.08f, 0.10f, 0.96f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.07f, 0.07f, 0.09f, 0.80f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.10f, 0.10f, 0.12f, 0.96f);
+
+    c[ImGuiCol_Border]               = ImVec4(0.28f, 0.25f, 0.18f, 0.50f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+    c[ImGuiCol_FrameBg]              = ImVec4(0.14f, 0.13f, 0.11f, 0.80f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.22f, 0.20f, 0.14f, 0.80f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.28f, 0.25f, 0.16f, 0.90f);
+
+    c[ImGuiCol_TitleBg]              = ImVec4(0.10f, 0.09f, 0.07f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.16f, 0.14f, 0.08f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.08f, 0.07f, 0.05f, 0.75f);
+
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.12f, 0.11f, 0.09f, 1.00f);
+
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.06f, 0.06f, 0.07f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.30f, 0.27f, 0.18f, 0.80f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.40f, 0.36f, 0.22f, 0.90f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.50f, 0.44f, 0.26f, 1.00f);
+
+    c[ImGuiCol_CheckMark]            = ImVec4(0.90f, 0.75f, 0.25f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.70f, 0.58f, 0.20f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.85f, 0.70f, 0.25f, 1.00f);
+
+    c[ImGuiCol_Button]               = ImVec4(0.22f, 0.20f, 0.12f, 0.80f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.35f, 0.30f, 0.14f, 0.90f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.45f, 0.38f, 0.16f, 1.00f);
+
+    c[ImGuiCol_Header]               = ImVec4(0.18f, 0.16f, 0.10f, 0.70f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.28f, 0.24f, 0.12f, 0.80f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.35f, 0.30f, 0.14f, 0.90f);
+
+    c[ImGuiCol_Separator]            = ImVec4(0.28f, 0.25f, 0.18f, 0.40f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.50f, 0.42f, 0.20f, 0.70f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.65f, 0.55f, 0.25f, 1.00f);
+
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.30f, 0.27f, 0.18f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.50f, 0.44f, 0.26f, 0.60f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.65f, 0.55f, 0.25f, 0.90f);
+
+    c[ImGuiCol_Tab]                  = ImVec4(0.14f, 0.13f, 0.10f, 0.86f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.35f, 0.30f, 0.14f, 0.90f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.28f, 0.24f, 0.10f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.10f, 0.09f, 0.07f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.18f, 0.16f, 0.10f, 1.00f);
+
+    c[ImGuiCol_Text]                 = ImVec4(0.90f, 0.87f, 0.78f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.50f, 0.47f, 0.40f, 1.00f);
+
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
+
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.70f, 0.58f, 0.20f, 1.00f);
+
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.14f, 0.13f, 0.10f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.28f, 0.25f, 0.18f, 0.60f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.22f, 0.20f, 0.15f, 0.40f);
+    c[ImGuiCol_TableRowBg]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_TableRowBgAlt]        = ImVec4(0.10f, 0.10f, 0.08f, 0.30f);
+
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.65f, 0.55f, 0.15f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.80f, 0.68f, 0.20f, 1.00f);
+}
+
 // --- Addon Lifecycle ---
 
 void AddonLoad(AddonAPI_t* aApi) {
@@ -894,11 +1180,14 @@ void AddonLoad(AddonAPI_t* aApi) {
     ImGui::SetAllocatorFunctions((void* (*)(size_t, void*))APIDefs->ImguiMalloc,
                                  (void(*)(void*, void*))APIDefs->ImguiFree);
 
+    BuildGW2Theme();
+
     // Initialize WvW API
     RealmReport::WvWAPI::Initialize();
 
     // Load saved settings
     bool hasWorld = RealmReport::WvWAPI::LoadSelectedWorld();
+    g_PinnedObjectiveIds = RealmReport::WvWAPI::GetPinnedObjectives();
     g_FlipNotifications = RealmReport::WvWAPI::GetFlipNotifications();
     g_ToastDuration = RealmReport::WvWAPI::GetToastDuration();
     g_FlipSound = RealmReport::WvWAPI::GetFlipSoundEnabled();
@@ -912,6 +1201,16 @@ void AddonLoad(AddonAPI_t* aApi) {
         g_SortAscending = asc;
     }
     RealmReport::WvWAPI::GetToastLayout(g_ToastAnchorX, g_ToastAnchorY, g_ToastW, g_ToastH);
+    g_ShowQuickAccess = RealmReport::WvWAPI::GetShowQuickAccess();
+
+    // Load icon textures
+    APIDefs->Textures_GetOrCreateFromMemory("RR_ICON", (void*)g_RRIconData, g_RRIconDataLen);
+    APIDefs->Textures_GetOrCreateFromMemory("RR_ICON_HOVER", (void*)g_RRIconHoverData, g_RRIconHoverDataLen);
+
+    // Register quick access shortcut
+    if (g_ShowQuickAccess) {
+        APIDefs->QuickAccess_Add("QA_REALM_REPORT", "RR_ICON", "RR_ICON_HOVER", "KB_REALM_TOGGLE", "Realm Report");
+    }
 
     // Fetch world list
     RealmReport::WvWAPI::FetchWorldListAsync();
@@ -934,6 +1233,10 @@ void AddonLoad(AddonAPI_t* aApi) {
 
 void AddonUnload() {
     RealmReport::WvWAPI::Shutdown();
+
+    if (g_ShowQuickAccess) {
+        APIDefs->QuickAccess_Remove("QA_REALM_REPORT");
+    }
 
     APIDefs->GUI_DeregisterCloseOnEscape("Realm Report");
     APIDefs->InputBinds_Deregister("KB_REALM_TOGGLE");
@@ -1273,9 +1576,69 @@ static void ManageAutoPolling() {
     }
 }
 
+// --- Stale API Banner ---
+
+static void RenderStaleBanner() {
+    if (!RealmReport::WvWAPI::HasMatchData()) return;
+
+    int secsSince = RealmReport::WvWAPI::GetSecondsSinceLastFetch();
+
+    // Detect recovery transition
+    if (g_ApiStale && secsSince >= 0 && secsSince < STALE_THRESHOLD_SECS) {
+        g_ApiStale = false;
+        g_ApiRecoveredAt = std::chrono::steady_clock::now();
+    }
+
+    if (secsSince >= STALE_THRESHOLD_SECS) {
+        g_ApiStale = true;
+    }
+
+    ImVec4 bgColor{};
+    char bannerText[128]{};
+
+    if (g_ApiStale) {
+        bgColor = ImVec4(0.55f, 0.10f, 0.10f, 0.85f);
+        int m = secsSince / 60;
+        int s = secsSince % 60;
+        if (m > 0)
+            snprintf(bannerText, sizeof(bannerText),
+                "  GW2 API appears to be down \xe2\x80\x94 no fresh data for %dm %ds. Checks will continue.", m, s);
+        else
+            snprintf(bannerText, sizeof(bannerText),
+                "  GW2 API appears to be down \xe2\x80\x94 no fresh data for %ds. Checks will continue.", s);
+    } else if (g_ApiRecoveredAt.time_since_epoch().count() != 0) {
+        float elapsed = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - g_ApiRecoveredAt).count();
+        if (elapsed >= RECOVERY_BANNER_SECS) {
+            g_ApiRecoveredAt = {};
+            return;
+        }
+        bgColor = ImVec4(0.10f, 0.45f, 0.10f, 0.85f);
+        snprintf(bannerText, sizeof(bannerText), "  GW2 API is back \xe2\x80\x94 data refreshed.");
+    } else {
+        return;
+    }
+
+    ImDrawList* dl  = ImGui::GetWindowDrawList();
+    ImVec2 pos      = ImGui::GetCursorScreenPos();
+    float  padY     = ImGui::GetStyle().FramePadding.y;
+    float  lineH    = ImGui::GetFontSize() + padY * 2.0f;
+    float  width    = ImGui::GetContentRegionAvail().x;
+
+    dl->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + lineH),
+                      ImGui::ColorConvertFloat4ToU32(bgColor), 3.0f);
+    dl->AddText(ImVec2(pos.x, pos.y + padY),
+                IM_COL32(255, 255, 255, 230), bannerText);
+
+    ImGui::Dummy(ImVec2(width, lineH));
+    ImGui::Spacing();
+}
+
 // --- Main Render ---
 
 void AddonRender() {
+    ThemeGuard themeGuard;
+
     // Check if player is on a WvW map
     UpdateWvWMapState();
     ManageAutoPolling();
@@ -1326,6 +1689,9 @@ void AddonRender() {
 
     // World selector
     RenderWorldSelector();
+
+    // Stale API warning / recovery banner
+    RenderStaleBanner();
 
     // Reserve space for bottom status bar
     float statusBarH = ImGui::GetFrameHeightWithSpacing() + 4;
@@ -1472,6 +1838,8 @@ void AddonRender() {
 // --- Options/Settings Render ---
 
 void AddonOptions() {
+    ThemeGuard themeGuard;
+
     ImGui::Text("Realm Report Settings");
     if (ImGui::SmallButton("Homepage")) {
         ShellExecuteA(NULL, "open", "https://pie.rocks.cc/", NULL, NULL, SW_SHOWNORMAL);
@@ -1481,6 +1849,19 @@ void AddonOptions() {
         ShellExecuteA(NULL, "open", "https://ko-fi.com/pieorcake", NULL, NULL, SW_SHOWNORMAL);
     }
     ImGui::Separator();
+
+    // Quick access icon
+    if (ImGui::Checkbox("Show quick access icon", &g_ShowQuickAccess)) {
+        RealmReport::WvWAPI::SetShowQuickAccess(g_ShowQuickAccess);
+        RealmReport::WvWAPI::SaveSelectedWorld();
+        if (g_ShowQuickAccess) {
+            APIDefs->QuickAccess_Add("QA_REALM_REPORT", "RR_ICON", "RR_ICON_HOVER", "KB_REALM_TOGGLE", "Realm Report");
+        } else {
+            APIDefs->QuickAccess_Remove("QA_REALM_REPORT");
+        }
+    }
+
+    ImGui::Spacing();
 
     // Poll interval
     int interval = RealmReport::WvWAPI::GetPollIntervalSeconds();

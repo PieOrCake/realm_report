@@ -58,9 +58,15 @@ namespace RealmReport {
     }
 
     int ComputeUpgradeTier(int yaks_delivered) {
-        if (yaks_delivered >= 140) return 3;
-        if (yaks_delivered >= 60)  return 2;
-        if (yaks_delivered >= 20)  return 1;
+        // Thresholds vary by objective type; keep values used as common case:
+        //   Camp:   T1=10  T2=20  T3=40
+        //   Tower:  T1=15  T2=30  T3=50
+        //   Keep:   T1=20  T2=40  T3=80
+        //   Castle: T1=40  T2=70  T3=100
+        // Using keep thresholds here; pips are approximate for other types.
+        if (yaks_delivered >= 80) return 3;
+        if (yaks_delivered >= 40) return 2;
+        if (yaks_delivered >= 20) return 1;
         return 0;
     }
 
@@ -97,6 +103,8 @@ namespace RealmReport {
     bool WvWAPI::s_sort_ascending = true;
     float WvWAPI::s_pinned_opacity = 0.6f;
     std::atomic<uint64_t> WvWAPI::s_data_version{0};
+    std::unordered_set<std::string> WvWAPI::s_pinned_objectives;
+    bool WvWAPI::s_show_quick_access = true;
 
     // --- Helper: get DLL directory ---
 
@@ -398,6 +406,16 @@ namespace RealmReport {
         return s_flat_list;
     }
 
+    void WvWAPI::SetShowQuickAccess(bool enabled) {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_show_quick_access = enabled;
+    }
+
+    bool WvWAPI::GetShowQuickAccess() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        return s_show_quick_access;
+    }
+
     void WvWAPI::SetToastLayout(float ax, float ay, float w, float h) {
         std::lock_guard<std::mutex> lock(s_mutex);
         s_toast_anchor_x = ax;
@@ -412,6 +430,60 @@ namespace RealmReport {
         ay = s_toast_anchor_y;
         w = s_toast_w;
         h = s_toast_h;
+    }
+
+    void WvWAPI::SetPinnedObjectives(const std::unordered_set<std::string>& ids) {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_pinned_objectives = ids;
+    }
+
+    std::unordered_set<std::string> WvWAPI::GetPinnedObjectives() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        return s_pinned_objectives;
+    }
+
+    int WvWAPI::GetNearestWaypointId(const std::string& obj_id) {
+        // Computed from GW2 API coordinate data (v2/wvw/objectives?ids=all and
+        // v2/continents/2/floors/3/regions/7/maps/<id>). Conditional = keep/castle WP.
+        static const std::unordered_map<std::string, int> k_nearest = {
+            // EBG (Center)
+            {"38-1",  1214}, {"38-2",  1215}, {"38-3",  1216}, {"38-4",  1216},
+            {"38-5",  1214}, {"38-6",  1019}, {"38-7",  1215}, {"38-8",  1215},
+            {"38-9",  1213}, {"38-10", 1216}, {"38-11", 1216}, {"38-12", 1216},
+            {"38-13", 1216}, {"38-14", 1216}, {"38-15", 1215}, {"38-16", 1213},
+            {"38-17", 1019}, {"38-18", 1213}, {"38-19", 1214}, {"38-20", 1214},
+            {"38-21", 1213}, {"38-22", 1215},
+            // Blue Alpine BL
+            {"96-32", 1239}, {"96-33", 1235}, {"96-34", 1240}, {"96-35", 1235},
+            {"96-36", 1240}, {"96-37", 1237}, {"96-38", 1238}, {"96-39", 1238},
+            {"96-40", 1238}, {"96-50", 1240}, {"96-51", 1239}, {"96-52", 1235},
+            {"96-53", 1235},
+            // Green Alpine BL
+            {"95-32", 1245}, {"95-33", 1241}, {"95-34", 1246}, {"95-35", 1241},
+            {"95-36", 1246}, {"95-37", 1243}, {"95-38", 1244}, {"95-39", 1244},
+            {"95-40", 1244}, {"95-50", 1246}, {"95-51", 1245}, {"95-52", 1241},
+            {"95-53", 1241},
+            // Red Desert BL
+            {"1099-99",  2276}, {"1099-100", 2150}, {"1099-101", 2247},
+            {"1099-102", 2276}, {"1099-104", 2301}, {"1099-105", 2187},
+            {"1099-106", 2221}, {"1099-109", 2150}, {"1099-110", 2247},
+            {"1099-113", 2301}, {"1099-114", 2150}, {"1099-115", 2221},
+            {"1099-116", 2247},
+        };
+        auto it = k_nearest.find(obj_id);
+        return (it != k_nearest.end()) ? it->second : 0;
+    }
+
+    bool WvWAPI::IsWaypointConditional(int waypoint_id) {
+        // Keep/castle waypoints: only accessible when the objective is captured & fortified.
+        // Spawn, citadel, and border waypoints are permanent.
+        static const std::unordered_set<int> k_conditional = {
+            1213, 1214, 1215, 1216,        // EBG: Stonemist, Overlook, Valley, Lowlands
+            1235, 1237, 1239,              // Blue Alpine BL: Ascension Bay, Garrison, Askalion Hills
+            1241, 1243, 1245,              // Green Alpine BL: Dreadfall Bay, Garrison, Shadaran Hills
+            2150, 2221, 2301,              // Red Desert BL: Osprey's Palace, Blistering Undercroft, Stoic Rampart
+        };
+        return k_conditional.count(waypoint_id) > 0;
     }
 
     void WvWAPI::SaveSelectedWorld() {
@@ -434,6 +506,10 @@ namespace RealmReport {
             j["sort_column"] = s_sort_column;
             j["sort_ascending"] = s_sort_ascending;
             j["pinned_opacity"] = s_pinned_opacity;
+            j["show_quick_access"] = s_show_quick_access;
+            json pinned_arr = json::array();
+            for (const auto& id : s_pinned_objectives) pinned_arr.push_back(id);
+            j["pinned_objectives"] = pinned_arr;
         }
         std::ofstream file(path);
         if (file.is_open()) {
@@ -480,6 +556,13 @@ namespace RealmReport {
                 s_pinned_opacity = j["pinned_opacity"].get<float>();
                 if (s_pinned_opacity < 0.1f) s_pinned_opacity = 0.1f;
                 if (s_pinned_opacity > 1.0f) s_pinned_opacity = 1.0f;
+            }
+            if (j.contains("show_quick_access")) s_show_quick_access = j["show_quick_access"].get<bool>();
+            if (j.contains("pinned_objectives") && j["pinned_objectives"].is_array()) {
+                s_pinned_objectives.clear();
+                for (const auto& id : j["pinned_objectives"]) {
+                    if (id.is_string()) s_pinned_objectives.insert(id.get<std::string>());
+                }
             }
             return s_selected_world > 0;
         } catch (...) {
@@ -974,6 +1057,13 @@ namespace RealmReport {
         int elapsed_s = (int)std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
         int remaining = s_poll_interval - elapsed_s;
         return remaining > 0 ? remaining : 0;
+    }
+
+    int WvWAPI::GetSecondsSinceLastFetch() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        if (s_last_fetch_time.time_since_epoch().count() == 0) return -1;
+        auto elapsed = std::chrono::steady_clock::now() - s_last_fetch_time;
+        return (int)std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
     }
 
 } // namespace RealmReport

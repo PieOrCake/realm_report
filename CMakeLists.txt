@@ -36,11 +36,31 @@ set(IMGUI_SOURCES
     lib/imgui/imgui_widgets.cpp
 )
 
+# Embed PNG icons as C byte arrays
+add_custom_command(
+    OUTPUT ${CMAKE_SOURCE_DIR}/src/rr_icon_data.h
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/gen_icon_header.sh
+            ${CMAKE_SOURCE_DIR}/rr.png g_RRIconData
+            ${CMAKE_SOURCE_DIR}/src/rr_icon_data.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/rr.png ${CMAKE_SOURCE_DIR}/scripts/gen_icon_header.sh
+    COMMENT "Generating rr_icon_data.h"
+)
+add_custom_command(
+    OUTPUT ${CMAKE_SOURCE_DIR}/src/rr_icon_hover_data.h
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/gen_icon_header.sh
+            ${CMAKE_SOURCE_DIR}/rr_hover.png g_RRIconHoverData
+            ${CMAKE_SOURCE_DIR}/src/rr_icon_hover_data.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/rr_hover.png ${CMAKE_SOURCE_DIR}/scripts/gen_icon_header.sh
+    COMMENT "Generating rr_icon_hover_data.h"
+)
+
 # Source files
 set(SOURCES
     src/dllmain.cpp
     src/WvWAPI.cpp
     ${IMGUI_SOURCES}
+    ${CMAKE_SOURCE_DIR}/src/rr_icon_data.h
+    ${CMAKE_SOURCE_DIR}/src/rr_icon_hover_data.h
 )
 
 # Header files
