@@ -175,10 +175,97 @@ void MapWindow::RenderTiles(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize, int i
     }
 }
 
-void MapWindow::RenderObjectives(ImDrawList* /*dl*/, ImVec2 /*winPos*/,
-                                  ImVec2 /*winSize*/, int /*idx*/,
-                                  const RealmReport::WvWMap& /*wvwMap*/) {
-    // Implemented in Task 5
+static ImU32 TeamColour(RealmReport::TeamColor t) {
+    switch (t) {
+        case RealmReport::TeamColor::Red:     return IM_COL32(220, 50,  50,  255);
+        case RealmReport::TeamColor::Green:   return IM_COL32(50,  190, 50,  255);
+        case RealmReport::TeamColor::Blue:    return IM_COL32(50,  100, 220, 255);
+        default:                              return IM_COL32(140, 140, 140, 255);
+    }
+}
+
+static float ObjRadius(RealmReport::ObjectiveType t) {
+    switch (t) {
+        case RealmReport::ObjectiveType::Castle: return 14.f;
+        case RealmReport::ObjectiveType::Keep:   return 11.f;
+        case RealmReport::ObjectiveType::Tower:  return  8.f;
+        default:                                 return  5.f;
+    }
+}
+
+void MapWindow::RenderObjectives(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
+                                  int idx, const RealmReport::WvWMap& wvwMap) {
+    float t = (float)ImGui::GetTime();
+
+    for (const auto& obj : wvwMap.objectives) {
+        if (obj.coord_x == 0.f && obj.coord_y == 0.f) continue;
+
+        ImVec2 sp = ContToScreen(idx, winPos, winSize, obj.coord_x, obj.coord_y);
+
+        // Cull objectives outside the window (plus a margin)
+        if (sp.x < winPos.x - 20.f || sp.x > winPos.x + winSize.x + 20.f) continue;
+        if (sp.y < winPos.y - 20.f || sp.y > winPos.y + winSize.y + 20.f) continue;
+
+        float r     = ObjRadius(obj.type);
+        ImU32 col   = TeamColour(obj.owner);
+        ImU32 black = IM_COL32(0, 0, 0, 200);
+
+        // Draw shape by type
+        if (obj.type == RealmReport::ObjectiveType::Castle ||
+            obj.type == RealmReport::ObjectiveType::Keep) {
+            dl->AddNgonFilled(sp, r, col, 6);
+            dl->AddNgon(sp, r, black, 6, 1.5f);
+        } else if (obj.type == RealmReport::ObjectiveType::Tower) {
+            ImVec2 p0{sp.x - r, sp.y};
+            ImVec2 p1{sp.x,     sp.y - r};
+            ImVec2 p2{sp.x + r, sp.y};
+            ImVec2 p3{sp.x,     sp.y + r};
+            dl->AddQuadFilled(p0, p1, p2, p3, col);
+            dl->AddQuad(p0, p1, p2, p3, black, 1.5f);
+        } else {
+            dl->AddCircleFilled(sp, r, col);
+            dl->AddCircle(sp, r, black, 0, 1.5f);
+        }
+
+        // --- Ring: recently flipped (60–300s) ---
+        if (obj.seconds_since_flip >= 60 && obj.seconds_since_flip < 300) {
+            float progress = (float)obj.seconds_since_flip / 300.f;
+            float pulse    = 0.5f + 0.5f * sinf(t * 3.f);
+            float alpha    = (1.f - progress) * (0.4f + 0.5f * pulse);
+            ImU32 ringCol  = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 0.85f, 0.2f, alpha));
+            float ringR    = r + 5.f + 2.f * pulse;
+            dl->AddCircle(sp, ringR, ringCol, 0, 3.f);
+        }
+
+        // --- Crossed swords: contested (<60s) ---
+        if (obj.seconds_since_flip >= 0 && obj.seconds_since_flip < 60) {
+            float scale = 1.f + 0.35f * sinf(t * 7.f);
+            float sz    = 9.f * scale;
+            ImU32 swCol = IM_COL32(230, 40, 40, 230);
+            dl->AddLine(ImVec2(sp.x - sz, sp.y - sz), ImVec2(sp.x + sz, sp.y + sz), swCol, 2.5f);
+            dl->AddLine(ImVec2(sp.x + sz, sp.y - sz), ImVec2(sp.x - sz, sp.y + sz), swCol, 2.5f);
+            dl->AddCircleFilled(ImVec2(sp.x - sz, sp.y - sz), 2.5f, swCol);
+            dl->AddCircleFilled(ImVec2(sp.x + sz, sp.y + sz), 2.5f, swCol);
+            dl->AddCircleFilled(ImVec2(sp.x + sz, sp.y - sz), 2.5f, swCol);
+            dl->AddCircleFilled(ImVec2(sp.x - sz, sp.y + sz), 2.5f, swCol);
+        }
+
+        // Hover tooltip
+        if (ImGui::IsMouseHoveringRect(
+                ImVec2(sp.x - r - 2.f, sp.y - r - 2.f),
+                ImVec2(sp.x + r + 2.f, sp.y + r + 2.f))) {
+            ImGui::BeginTooltip();
+            ImGui::Text("%s", obj.name.c_str());
+            ImGui::Text("Owner: %s | Tier: %d",
+                        RealmReport::TeamColorToString(obj.owner),
+                        obj.upgrade_tier);
+            if (!obj.claimed_by.empty())
+                ImGui::Text("Claimed: %s", obj.claimed_by.c_str());
+            if (obj.seconds_since_flip >= 0)
+                ImGui::Text("Flipped: %ds ago", obj.seconds_since_flip);
+            ImGui::EndTooltip();
+        }
+    }
 }
 
 void MapWindow::RenderPlayerDot(ImDrawList* /*dl*/, ImVec2 /*winPos*/,
