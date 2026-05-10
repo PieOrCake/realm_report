@@ -58,6 +58,7 @@ add_custom_command(
 set(SOURCES
     src/dllmain.cpp
     src/WvWAPI.cpp
+    src/TileCache.cpp
     ${IMGUI_SOURCES}
     ${CMAKE_SOURCE_DIR}/src/rr_icon_data.h
     ${CMAKE_SOURCE_DIR}/src/rr_icon_hover_data.h
