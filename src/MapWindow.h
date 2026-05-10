@@ -39,6 +39,7 @@ private:
         float orig_y = 0.f;
     };
     std::array<TabState, 4> m_tabs;
+    ImVec2 m_lastDrag = {0.f, 0.f};
     int  m_activeTab  = 0;
     bool m_prefetched[4] = {false, false, false, false};
 

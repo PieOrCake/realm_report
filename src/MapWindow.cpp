@@ -99,15 +99,14 @@ void MapWindow::RenderTab(int idx, const RealmReport::WvWMap& wvwMap, bool inWvw
 
     // Left drag to pan (track delta manually to avoid ResetMouseDragDelta compat issues)
     {
-        static ImVec2 s_lastDrag{0, 0};
         ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0.f);
         if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.f)) {
-            ImVec2 delta{drag.x - s_lastDrag.x, drag.y - s_lastDrag.y};
+            ImVec2 delta{drag.x - m_lastDrag.x, drag.y - m_lastDrag.y};
             ts.orig_x -= delta.x / ts.zoom;
             ts.orig_y -= delta.y / ts.zoom;
-            s_lastDrag = drag;
+            m_lastDrag = drag;
         } else {
-            s_lastDrag = {0, 0};
+            m_lastDrag = {0, 0};
         }
     }
 
