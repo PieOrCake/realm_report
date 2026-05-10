@@ -1,6 +1,41 @@
 #include "MapWindow.h"
 #include <algorithm>
 #include <cmath>
+#include <string>
+#include <unordered_map>
+
+static std::string FmtDuration(int s) {
+    if (s < 0)    return "---";
+    if (s < 60)   return std::to_string(s) + "s";
+    if (s < 3600) {
+        int m = s / 60, sec = s % 60;
+        return sec ? std::to_string(m) + "m" + std::to_string(sec) + "s"
+                   : std::to_string(m) + "m";
+    }
+    int h = s / 3600, m = (s % 3600) / 60;
+    return m ? std::to_string(h) + "h" + std::to_string(m) + "m"
+             : std::to_string(h) + "h";
+}
+
+static const std::unordered_map<std::string, std::string> k_ObjLabels = {
+    {"38-9",    "SMC"},
+    {"38-18",   "ANZ"},
+    {"96-37",   "Garri"},
+    {"95-37",   "Garri"},
+    {"96-32",   "Hills"},
+    {"95-32",   "Hills"},
+    {"96-33",   "Bay"},
+    {"95-33",   "Bay"},
+    {"1099-106","Fire Keep"},
+};
+
+static std::string ObjectiveLabel(const RealmReport::Objective& obj) {
+    auto it = k_ObjLabels.find(obj.id);
+    if (it != k_ObjLabels.end()) return it->second;
+    // First word of name
+    auto pos = obj.name.find(' ');
+    return pos == std::string::npos ? obj.name : obj.name.substr(0, pos);
+}
 
 const char* MapWindow::k_TabNames[4] = {"EBG", "Blue BL", "Green BL", "Red BL"};
 const char* MapWindow::k_MapTypes[4] = {"Center", "BlueHome", "GreenHome", "RedHome"};
@@ -38,17 +73,44 @@ void MapWindow::Render(const RealmReport::MatchData& md, bool inWvw,
 
     if (ImGui::BeginTabBar("##wvwmaps")) {
         for (int i = 0; i < 4; ++i) {
-            if (ImGui::BeginTabItem(k_TabNames[i])) {
+            // Append " !" when the map's data looks stale.
+            // Use the age of the most recently flipped objective — WvW always has activity,
+            // so a freshest-flip older than 5 minutes means the API is serving stale data.
+            bool mapStale = false;
+            if (RealmReport::WvWAPI::HasMatchData()) {
+                int mostRecent = INT_MAX;
+                for (const auto& wm : md.maps) {
+                    if (wm.type != k_MapTypes[i]) continue;
+                    for (const auto& obj : wm.objectives) {
+                        if (obj.type == RealmReport::ObjectiveType::Camp  ||
+                            obj.type == RealmReport::ObjectiveType::Tower ||
+                            obj.type == RealmReport::ObjectiveType::Keep  ||
+                            obj.type == RealmReport::ObjectiveType::Castle) {
+                            if (obj.seconds_since_flip >= 0 && obj.seconds_since_flip < mostRecent)
+                                mostRecent = obj.seconds_since_flip;
+                        }
+                    }
+                    break;
+                }
+                mapStale = (mostRecent >= 300);
+            }
+            if (mapStale)
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.25f, 0.25f, 1.f));
+            bool tabOpen = ImGui::BeginTabItem(k_TabNames[i]);
+            if (mapStale)
+                ImGui::PopStyleColor();
+
+            if (tabOpen) {
                 m_activeTab = i;
 
-                // Lazy prefetch: try once bounds are loaded
+                // Set initial camera position to map centre once bounds are available.
+                // Tiles load on demand via GetTile in RenderTiles — no batch prefetch,
+                // which would flood the 100ms-throttled download queue and block other tabs.
                 if (!m_prefetched[i]) {
                     auto b = RealmReport::WvWAPI::GetMapBounds(k_MapTypes[i]);
                     if (b.cont_max_x > 0.f) {
                         m_tabs[i].orig_x = (b.cont_min_x + b.cont_max_x) * 0.5f;
                         m_tabs[i].orig_y = (b.cont_min_y + b.cont_max_y) * 0.5f;
-                        m_tiles.PrefetchRegion(b.cont_min_x, b.cont_min_y,
-                                               b.cont_max_x, b.cont_max_y);
                         m_prefetched[i] = true;
                     }
                 }
@@ -227,27 +289,14 @@ void MapWindow::RenderObjectives(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
             dl->AddCircle(sp, r, black, 0, 1.5f);
         }
 
-        // --- Ring: recently flipped (60–300s) ---
-        if (obj.seconds_since_flip >= 60 && obj.seconds_since_flip < 300) {
+        // --- Ring: recently flipped (0–300s) ---
+        if (obj.seconds_since_flip >= 0 && obj.seconds_since_flip < 300) {
             float progress = (float)obj.seconds_since_flip / 300.f;
             float pulse    = 0.5f + 0.5f * sinf(t * 3.f);
             float alpha    = (1.f - progress) * (0.4f + 0.5f * pulse);
             ImU32 ringCol  = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 0.85f, 0.2f, alpha));
             float ringR    = r + 5.f + 2.f * pulse;
             dl->AddCircle(sp, ringR, ringCol, 0, 3.f);
-        }
-
-        // --- Crossed swords: contested (<60s) ---
-        if (obj.seconds_since_flip >= 0 && obj.seconds_since_flip < 60) {
-            float scale = 1.f + 0.35f * sinf(t * 7.f);
-            float sz    = 9.f * scale;
-            ImU32 swCol = IM_COL32(230, 40, 40, 230);
-            dl->AddLine(ImVec2(sp.x - sz, sp.y - sz), ImVec2(sp.x + sz, sp.y + sz), swCol, 2.5f);
-            dl->AddLine(ImVec2(sp.x + sz, sp.y - sz), ImVec2(sp.x - sz, sp.y + sz), swCol, 2.5f);
-            dl->AddCircleFilled(ImVec2(sp.x - sz, sp.y - sz), 2.5f, swCol);
-            dl->AddCircleFilled(ImVec2(sp.x + sz, sp.y + sz), 2.5f, swCol);
-            dl->AddCircleFilled(ImVec2(sp.x + sz, sp.y - sz), 2.5f, swCol);
-            dl->AddCircleFilled(ImVec2(sp.x - sz, sp.y + sz), 2.5f, swCol);
         }
 
         // Hover tooltip
@@ -262,7 +311,7 @@ void MapWindow::RenderObjectives(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
             if (!obj.claimed_by.empty())
                 ImGui::Text("Claimed: %s", obj.claimed_by.c_str());
             if (obj.seconds_since_flip >= 0)
-                ImGui::Text("Flipped: %ds ago", obj.seconds_since_flip);
+                ImGui::Text("Flipped: %s ago", FmtDuration(obj.seconds_since_flip).c_str());
             ImGui::EndTooltip();
         }
     }
