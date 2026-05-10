@@ -299,6 +299,20 @@ void MapWindow::RenderObjectives(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
             dl->AddCircle(sp, ringR, ringCol, 0, 3.f);
         }
 
+        // --- Label below icon ---
+        {
+            std::string label = ObjectiveLabel(obj);
+            ImVec2 tsz = ImGui::CalcTextSize(label.c_str());
+            ImVec2 tp  = ImVec2(sp.x - tsz.x * 0.5f,
+                                sp.y + r + 3.f);
+            // Dark background for readability over tiles
+            dl->AddRectFilled(
+                ImVec2(tp.x - 2.f, tp.y - 1.f),
+                ImVec2(tp.x + tsz.x + 2.f, tp.y + tsz.y + 1.f),
+                IM_COL32(0, 0, 0, 160));
+            dl->AddText(tp, IM_COL32(255, 255, 255, 230), label.c_str());
+        }
+
         // Hover tooltip
         if (ImGui::IsMouseHoveringRect(
                 ImVec2(sp.x - r - 2.f, sp.y - r - 2.f),
