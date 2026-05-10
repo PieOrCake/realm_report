@@ -131,9 +131,48 @@ void MapWindow::RenderTab(int idx, const RealmReport::WvWMap& wvwMap, bool inWvw
     dl->PopClipRect();
 }
 
-void MapWindow::RenderTiles(ImDrawList* /*dl*/, ImVec2 /*winPos*/,
-                             ImVec2 /*winSize*/, int /*idx*/) {
-    // Implemented in Task 4
+void MapWindow::RenderTiles(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize, int idx) {
+    const TabState& ts = m_tabs[idx];
+    if (ts.zoom <= 0.f) return;
+
+    // Choose tile zoom level: pick the smallest tz where tiles appear >= 200px wide on screen
+    int tz = 4;
+    for (int z = 4; z <= 7; ++z) {
+        float span = 32768.0f / (float)(1 << z);
+        tz = z;
+        if (span * ts.zoom >= 200.f) break;
+    }
+    float tile_span = 32768.0f / (float)(1 << tz);
+
+    // Visible continent rectangle
+    float half_w = winSize.x * 0.5f / ts.zoom;
+    float half_h = winSize.y * 0.5f / ts.zoom;
+    float c_minX = ts.orig_x - half_w;
+    float c_maxX = ts.orig_x + half_w;
+    float c_minY = ts.orig_y - half_h;
+    float c_maxY = ts.orig_y + half_h;
+
+    int tx_min = (int)floorf(c_minX / tile_span);
+    int tx_max = (int)floorf(c_maxX / tile_span);
+    int ty_min = (int)floorf(c_minY / tile_span);
+    int ty_max = (int)floorf(c_maxY / tile_span);
+
+    for (int tx = tx_min; tx <= tx_max; ++tx) {
+        for (int ty = ty_min; ty <= ty_max; ++ty) {
+            float sx = winPos.x + winSize.x * 0.5f + ((float)tx * tile_span - ts.orig_x) * ts.zoom;
+            float sy = winPos.y + winSize.y * 0.5f + ((float)ty * tile_span - ts.orig_y) * ts.zoom;
+            float ex = sx + tile_span * ts.zoom;
+            float ey = sy + tile_span * ts.zoom;
+
+            Texture_t* tex = m_tiles.GetTile(tz, tx, ty);
+            if (tex && tex->Resource) {
+                dl->AddImage((ImTextureID)tex->Resource, {sx, sy}, {ex, ey});
+            } else {
+                // Dark placeholder while tile loads
+                dl->AddRectFilled({sx, sy}, {ex, ey}, IM_COL32(25, 28, 35, 255));
+            }
+        }
+    }
 }
 
 void MapWindow::RenderObjectives(ImDrawList* /*dl*/, ImVec2 /*winPos*/,
