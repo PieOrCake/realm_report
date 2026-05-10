@@ -27,6 +27,8 @@ static const std::unordered_map<std::string, std::string> k_ObjLabels = {
     {"96-33",   "Bay"},
     {"95-33",   "Bay"},
     {"1099-106","Fire Keep"},
+    {"95-39",   "Titanpaw"},
+    {"96-39",   "Spiritholme"},
 };
 
 static std::string ObjectiveLabel(const RealmReport::Objective& obj) {
