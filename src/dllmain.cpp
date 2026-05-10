@@ -13,6 +13,7 @@
 #include "nexus/Nexus.h"
 #include "imgui.h"
 #include "WvWAPI.h"
+#include "MapWindow.h"
 #include "rr_icon_data.h"
 #include "rr_icon_hover_data.h"
 
@@ -84,6 +85,8 @@ AddonAPI_t* APIDefs = nullptr;
 bool g_WindowVisible = false;
 static bool g_IsOnWvWMap = false;
 static bool g_ShowQuickAccess = true;
+static MapWindow g_MapWindow;
+static bool      g_ShowMapWindow = false;
 
 // Stale-data banner state
 static bool  g_ApiStale                                   = false;
@@ -1202,10 +1205,16 @@ void AddonLoad(AddonAPI_t* aApi) {
     }
     RealmReport::WvWAPI::GetToastLayout(g_ToastAnchorX, g_ToastAnchorY, g_ToastW, g_ToastH);
     g_ShowQuickAccess = RealmReport::WvWAPI::GetShowQuickAccess();
+    g_ShowMapWindow = RealmReport::WvWAPI::GetShowMapWindow();
 
     // Load icon textures
     APIDefs->Textures_GetOrCreateFromMemory("RR_ICON", (void*)g_RRIconData, g_RRIconDataLen);
     APIDefs->Textures_GetOrCreateFromMemory("RR_ICON_HOVER", (void*)g_RRIconHoverData, g_RRIconHoverDataLen);
+
+    // Init map window
+    std::string mapDataDir = RealmReport::WvWAPI::GetDataDirectory();
+    g_MapWindow.Init(APIDefs, mapDataDir);
+    g_MapWindow.enabled = g_ShowMapWindow;
 
     // Register quick access shortcut
     if (g_ShowQuickAccess) {
@@ -1224,6 +1233,7 @@ void AddonLoad(AddonAPI_t* aApi) {
     // Register keybind
     APIDefs->InputBinds_RegisterWithString("KB_REALM_TOGGLE", ProcessKeybind, "ALT+SHIFT+W");
     APIDefs->InputBinds_RegisterWithString("KB_REALM_PIN", ProcessKeybind, "(null)");
+    APIDefs->InputBinds_RegisterWithString("KB_TOGGLE_MAP", ProcessKeybind, "ALT+M");
 
     // Register close-on-escape
     APIDefs->GUI_RegisterCloseOnEscape("Realm Report", &g_WindowVisible);
@@ -1232,6 +1242,7 @@ void AddonLoad(AddonAPI_t* aApi) {
 }
 
 void AddonUnload() {
+    g_MapWindow.Shutdown();
     RealmReport::WvWAPI::Shutdown();
 
     if (g_ShowQuickAccess) {
@@ -1241,6 +1252,7 @@ void AddonUnload() {
     APIDefs->GUI_DeregisterCloseOnEscape("Realm Report");
     APIDefs->InputBinds_Deregister("KB_REALM_TOGGLE");
     APIDefs->InputBinds_Deregister("KB_REALM_PIN");
+    APIDefs->InputBinds_Deregister("KB_TOGGLE_MAP");
     APIDefs->GUI_Deregister(AddonOptions);
     APIDefs->GUI_Deregister(AddonRender);
 
@@ -1266,6 +1278,11 @@ void ProcessKeybind(const char* aIdentifier, bool aIsRelease) {
         if (g_WindowVisible) {
             g_WindowPinned = !g_WindowPinned;
         }
+    } else if (strcmp(aIdentifier, "KB_TOGGLE_MAP") == 0) {
+        g_ShowMapWindow = !g_ShowMapWindow;
+        g_MapWindow.enabled = g_ShowMapWindow;
+        RealmReport::WvWAPI::SetShowMapWindow(g_ShowMapWindow);
+        RealmReport::WvWAPI::SaveSelectedWorld();
     }
 }
 
@@ -1833,6 +1850,21 @@ void AddonRender() {
         ImGui::End();
         ImGui::PopStyleVar(2);
     }
+
+    // WvW Battlefield Map window
+    if (g_ShowMapWindow) {
+        MumbleLinkedMem* mumble = (MumbleLinkedMem*)APIDefs->DataLink_Get(DL_MUMBLE_LINK);
+        float game_x = 0.f, game_z = 0.f;
+        int mumble_map_id = 0;
+        if (mumble && mumble->context_len >= 36) {
+            GW2Context* ctx = (GW2Context*)mumble->context;
+            mumble_map_id = (int)ctx->mapId;
+            game_x = mumble->fAvatarPosition[0];
+            game_z = mumble->fAvatarPosition[2];
+        }
+        RealmReport::MatchData md = RealmReport::WvWAPI::GetMatchData();
+        g_MapWindow.Render(md, g_IsOnWvWMap, mumble_map_id, game_x, game_z);
+    }
 }
 
 // --- Options/Settings Render ---
@@ -1860,6 +1892,15 @@ void AddonOptions() {
             APIDefs->QuickAccess_Remove("QA_REALM_REPORT");
         }
     }
+
+    // Map window
+    if (ImGui::Checkbox("Show WvW Battlefield Map", &g_ShowMapWindow)) {
+        g_MapWindow.enabled = g_ShowMapWindow;
+        RealmReport::WvWAPI::SetShowMapWindow(g_ShowMapWindow);
+        RealmReport::WvWAPI::SaveSelectedWorld();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(Alt+M)");
 
     ImGui::Spacing();
 

@@ -108,6 +108,7 @@ namespace RealmReport {
     std::atomic<uint64_t> WvWAPI::s_data_version{0};
     std::unordered_set<std::string> WvWAPI::s_pinned_objectives;
     bool WvWAPI::s_show_quick_access = true;
+    bool WvWAPI::s_show_map_window = false;
 
     // --- Helper: get DLL directory ---
 
@@ -419,6 +420,16 @@ namespace RealmReport {
         return s_show_quick_access;
     }
 
+    void WvWAPI::SetShowMapWindow(bool enabled) {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_show_map_window = enabled;
+    }
+
+    bool WvWAPI::GetShowMapWindow() {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        return s_show_map_window;
+    }
+
     void WvWAPI::SetToastLayout(float ax, float ay, float w, float h) {
         std::lock_guard<std::mutex> lock(s_mutex);
         s_toast_anchor_x = ax;
@@ -510,6 +521,7 @@ namespace RealmReport {
             j["sort_ascending"] = s_sort_ascending;
             j["pinned_opacity"] = s_pinned_opacity;
             j["show_quick_access"] = s_show_quick_access;
+            j["show_map_window"] = s_show_map_window;
             json pinned_arr = json::array();
             for (const auto& id : s_pinned_objectives) pinned_arr.push_back(id);
             j["pinned_objectives"] = pinned_arr;
@@ -561,6 +573,7 @@ namespace RealmReport {
                 if (s_pinned_opacity > 1.0f) s_pinned_opacity = 1.0f;
             }
             if (j.contains("show_quick_access")) s_show_quick_access = j["show_quick_access"].get<bool>();
+            if (j.contains("show_map_window")) s_show_map_window = j["show_map_window"].get<bool>();
             if (j.contains("pinned_objectives") && j["pinned_objectives"].is_array()) {
                 s_pinned_objectives.clear();
                 for (const auto& id : j["pinned_objectives"]) {

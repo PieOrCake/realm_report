@@ -192,6 +192,10 @@ namespace RealmReport {
         static void SetShowQuickAccess(bool enabled);
         static bool GetShowQuickAccess();
 
+        // Map window
+        static void SetShowMapWindow(bool enabled);
+        static bool GetShowMapWindow();
+
         // Nearest waypoint lookup (computed from map coordinates)
         static int  GetNearestWaypointId(const std::string& obj_id);
         static bool IsWaypointConditional(int waypoint_id);
@@ -259,6 +263,7 @@ namespace RealmReport {
         static std::atomic<uint64_t> s_data_version;
         static std::unordered_set<std::string> s_pinned_objectives;
         static bool s_show_quick_access;
+        static bool s_show_map_window;
     };
 
     // Utility
