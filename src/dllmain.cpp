@@ -20,7 +20,7 @@
 // Version constants
 #define V_MAJOR 0
 #define V_MINOR 9
-#define V_BUILD 3
+#define V_BUILD 4
 #define V_REVISION 0
 
 
@@ -360,6 +360,29 @@ static bool PassesMapFilter(const std::string& map_type) {
     if (map_type == "BlueHome")  return g_FilterBlueBL;
     if (map_type == "GreenHome") return g_FilterGreenBL;
     return true;
+}
+
+// Returns true if the API data for this map looks stale.
+// Checks the age of the most recently flipped objective (Camp/Tower/Keep/Castle only).
+// WvW always has activity, so if the freshest flip is older than 5 minutes the
+// API response itself is stale — not just our local fetch timing.
+static bool IsMapStale(const std::string& map_type) {
+    if (!RealmReport::WvWAPI::HasMatchData()) return false;
+    for (const auto& m : g_CachedMatch.maps) {
+        if (m.type != map_type) continue;
+        int most_recent = INT_MAX;
+        for (const auto& obj : m.objectives) {
+            if (obj.type == RealmReport::ObjectiveType::Camp  ||
+                obj.type == RealmReport::ObjectiveType::Tower ||
+                obj.type == RealmReport::ObjectiveType::Keep  ||
+                obj.type == RealmReport::ObjectiveType::Castle) {
+                if (obj.seconds_since_flip >= 0 && obj.seconds_since_flip < most_recent)
+                    most_recent = obj.seconds_since_flip;
+            }
+        }
+        return most_recent >= STALE_THRESHOLD_SECS;
+    }
+    return true; // map absent from API response
 }
 
 static bool PassesTypeFilter(RealmReport::ObjectiveType type) {
@@ -1026,7 +1049,11 @@ static void RenderObjectivesTable() {
         char hdr_label[64];
         snprintf(hdr_label, sizeof(hdr_label), "%s  (%d)", MapShortName(cd.map_type), (int)cd.objs.size());
 
+        if (IsMapStale(cd.map_type))
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.25f, 0.25f, 1.f));
         bool open = ImGui::CollapsingHeader(hdr_label, ImGuiTreeNodeFlags_DefaultOpen);
+        if (IsMapStale(cd.map_type))
+            ImGui::PopStyleColor();
         ImGui::PopStyleColor(3);
 
         if (!open) continue;
@@ -1707,8 +1734,7 @@ void AddonRender() {
     // World selector
     RenderWorldSelector();
 
-    // Stale API warning / recovery banner
-    RenderStaleBanner();
+    // Per-map stale indicators are shown on the chips and section headers below.
 
     // Reserve space for bottom status bar
     float statusBarH = ImGui::GetFrameHeightWithSpacing() + 4;
@@ -1734,27 +1760,36 @@ void AddonRender() {
         ImGui::SameLine(0, 12);
 
         // Map toggles as compact colored text buttons
-        auto MapToggle = [](const char* label, bool* val, ImVec4 color) {
+        auto MapToggle = [](const char* label, bool* val, ImVec4 color, bool stale) {
+
             if (*val) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(color.x, color.y, color.z, 0.25f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x, color.y, color.z, 0.40f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(color.x, color.y, color.z, 1.0f));
+                ImVec4 btnCol  = stale ? ImVec4(0.55f, 0.12f, 0.12f, 0.35f)
+                                       : ImVec4(color.x, color.y, color.z, 0.25f);
+                ImVec4 hovCol  = stale ? ImVec4(0.55f, 0.12f, 0.12f, 0.50f)
+                                       : ImVec4(color.x, color.y, color.z, 0.40f);
+                ImVec4 txtCol  = stale ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
+                                       : ImVec4(color.x, color.y, color.z, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, btnCol);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hovCol);
+                ImGui::PushStyleColor(ImGuiCol_Text, txtCol);
             } else {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.3f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.4f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+                ImVec4 txtCol = stale ? ImVec4(0.85f, 0.25f, 0.25f, 1.0f)
+                                      : ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, txtCol);
             }
             if (ImGui::SmallButton(label)) *val = !*val;
             ImGui::PopStyleColor(3);
         };
 
-        MapToggle("EBG", &g_FilterEBG, ImVec4(0.85f, 0.75f, 0.40f, 1.0f));
+        MapToggle("EBG",   &g_FilterEBG,    ImVec4(0.85f, 0.75f, 0.40f, 1.0f), IsMapStale("Center"));
         ImGui::SameLine(0, 2);
-        MapToggle("Red", &g_FilterRedBL, GetTeamColor(RealmReport::TeamColor::Red));
+        MapToggle("Red",   &g_FilterRedBL,  GetTeamColor(RealmReport::TeamColor::Red),   IsMapStale("RedHome"));
         ImGui::SameLine(0, 2);
-        MapToggle("Blue", &g_FilterBlueBL, GetTeamColor(RealmReport::TeamColor::Blue));
+        MapToggle("Blue",  &g_FilterBlueBL, GetTeamColor(RealmReport::TeamColor::Blue),  IsMapStale("BlueHome"));
         ImGui::SameLine(0, 2);
-        MapToggle("Green", &g_FilterGreenBL, GetTeamColor(RealmReport::TeamColor::Green));
+        MapToggle("Green", &g_FilterGreenBL,GetTeamColor(RealmReport::TeamColor::Green), IsMapStale("GreenHome"));
 
         ImGui::Spacing();
 
