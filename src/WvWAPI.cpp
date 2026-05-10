@@ -74,7 +74,10 @@ namespace RealmReport {
 
     std::unordered_map<std::string, std::string> WvWAPI::s_objective_names;
     std::unordered_map<std::string, std::string> WvWAPI::s_objective_types;
+    std::unordered_map<std::string, std::pair<float,float>> WvWAPI::s_objective_coords;
     std::unordered_map<std::string, std::string> WvWAPI::s_guild_names;
+    std::atomic<bool> WvWAPI::s_bounds_cached{false};
+    std::unordered_map<std::string, MapBounds> WvWAPI::s_map_bounds;
     std::vector<World> WvWAPI::s_worlds;
     std::atomic<bool> WvWAPI::s_worlds_ready{false};
     int WvWAPI::s_selected_world = 0;
@@ -590,10 +593,133 @@ namespace RealmReport {
                 if (!id.empty()) {
                     if (!name.empty()) s_objective_names[id] = name;
                     if (!type.empty()) s_objective_types[id] = type;
+                    if (obj.contains("coord") && obj["coord"].is_array() && obj["coord"].size() >= 2) {
+                        float cx = obj["coord"][0].get<float>();
+                        float cy = obj["coord"][1].get<float>();
+                        s_objective_coords[id] = {cx, cy};
+                    }
                 }
             }
             s_objectives_cached.store(true);
         } catch (...) {}
+    }
+
+    // --- Map Bounds ---
+
+    void WvWAPI::FetchMapBounds() {
+        if (s_bounds_cached.load()) return;
+
+        std::string cache_path = GetDataDirectory() + "/map_bounds_cache.json";
+
+        // Try loading from disk cache first
+        {
+            std::ifstream f(cache_path);
+            if (f.is_open()) {
+                try {
+                    json j;
+                    f >> j;
+                    std::lock_guard<std::mutex> lk(s_mutex);
+                    for (auto& [type, data] : j.items()) {
+                        MapBounds b;
+                        b.cont_min_x = data.value("cont_min_x", 0.f);
+                        b.cont_min_y = data.value("cont_min_y", 0.f);
+                        b.cont_max_x = data.value("cont_max_x", 0.f);
+                        b.cont_max_y = data.value("cont_max_y", 0.f);
+                        b.map_min_x  = data.value("map_min_x",  0.f);
+                        b.map_min_y  = data.value("map_min_y",  0.f);
+                        b.map_max_x  = data.value("map_max_x",  0.f);
+                        b.map_max_y  = data.value("map_max_y",  0.f);
+                        s_map_bounds[type] = b;
+                    }
+                    if (s_map_bounds.size() >= 4) {
+                        s_bounds_cached.store(true);
+                        return;
+                    }
+                } catch (...) {}
+            }
+        }
+
+        // Fetch from GW2 API
+        static const std::unordered_map<std::string, int> k_MapIds = {
+            {"Center",    38},
+            {"BlueHome",  96},
+            {"GreenHome", 95},
+            {"RedHome",   1099}
+        };
+
+        EnsureDataDirectory();
+        bool any_fetched = false;
+        for (auto& [type, id] : k_MapIds) {
+            std::string url = "https://api.guildwars2.com/v2/continents/2/floors/3/regions/7/maps/"
+                              + std::to_string(id);
+            std::string body = HttpGet(url);
+            if (body.empty()) continue;
+
+            auto j = json::parse(body, nullptr, false);
+            if (j.is_discarded()) continue;
+
+            MapBounds b{};
+            try {
+                auto& cr = j["continent_rect"];
+                b.cont_min_x = cr[0][0].get<float>();
+                b.cont_min_y = cr[0][1].get<float>();
+                b.cont_max_x = cr[1][0].get<float>();
+                b.cont_max_y = cr[1][1].get<float>();
+                auto& mr = j["map_rect"];
+                b.map_min_x = mr[0][0].get<float>();
+                b.map_min_y = mr[0][1].get<float>();
+                b.map_max_x = mr[1][0].get<float>();
+                b.map_max_y = mr[1][1].get<float>();
+            } catch (...) { continue; }
+
+            {
+                std::lock_guard<std::mutex> lk(s_mutex);
+                s_map_bounds[type] = b;
+            }
+            any_fetched = true;
+        }
+
+        if (any_fetched) {
+            // Save to disk cache
+            json cache_json;
+            {
+                std::lock_guard<std::mutex> lk(s_mutex);
+                for (auto& [type, b] : s_map_bounds) {
+                    cache_json[type] = {
+                        {"cont_min_x", b.cont_min_x}, {"cont_min_y", b.cont_min_y},
+                        {"cont_max_x", b.cont_max_x}, {"cont_max_y", b.cont_max_y},
+                        {"map_min_x",  b.map_min_x},  {"map_min_y",  b.map_min_y},
+                        {"map_max_x",  b.map_max_x},  {"map_max_y",  b.map_max_y}
+                    };
+                }
+            }
+            std::ofstream out(cache_path);
+            if (out.is_open()) out << cache_json.dump(2);
+            s_bounds_cached.store(true);
+        }
+    }
+
+    MapBounds WvWAPI::GetMapBounds(const std::string& mapType) {
+        std::lock_guard<std::mutex> lk(s_mutex);
+        auto it = s_map_bounds.find(mapType);
+        if (it != s_map_bounds.end()) return it->second;
+        return MapBounds{};
+    }
+
+    void WvWAPI::MumbleToContinent(const std::string& mapType,
+                                    float gx, float gz,
+                                    float& cx, float& cy) {
+        MapBounds b = GetMapBounds(mapType);
+        float mw = b.map_max_x - b.map_min_x;
+        float mh = b.map_max_y - b.map_min_y;
+        float cw = b.cont_max_x - b.cont_min_x;
+        float ch = b.cont_max_y - b.cont_min_y;
+        if (mw == 0.f || mh == 0.f) { cx = 0.f; cy = 0.f; return; }
+        // GW2 Mumble Link uses metres; GW2 map_rect uses inches (1 inch = 1/39.3701 m)
+        float ix = gx * 39.3701f;
+        float iy = gz * 39.3701f;
+        cx = (ix - b.map_min_x) / mw * cw + b.cont_min_x;
+        cy = (iy - b.map_min_y) / mh * ch + b.cont_min_y;
     }
 
     // --- Guild Name Resolution ---
@@ -719,6 +845,12 @@ namespace RealmReport {
                         obj.claimed_by = guild_it->second;
                     }
                 }
+                // Resolve coordinates
+                auto coord_it = s_objective_coords.find(obj.id);
+                if (coord_it != s_objective_coords.end()) {
+                    obj.coord_x = coord_it->second.first;
+                    obj.coord_y = coord_it->second.second;
+                }
                 // Compute derived fields
                 obj.seconds_since_flip = ParseTimeSinceFlip(obj.last_flipped);
                 obj.upgrade_tier = ComputeUpgradeTier(obj.yaks_delivered);
@@ -818,6 +950,7 @@ namespace RealmReport {
 
         // Ensure objective names are cached
         FetchObjectiveNames();
+        FetchMapBounds();
 
         {
             std::lock_guard<std::mutex> lock(s_mutex);

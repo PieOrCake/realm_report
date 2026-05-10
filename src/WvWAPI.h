@@ -50,6 +50,13 @@ namespace RealmReport {
         int points_tick = 0;
         int points_capture = 0;
         int upgrade_tier = 0;        // derived from yaks_delivered
+        float coord_x = 0.f;         // continent-space X (from /v2/wvw/objectives)
+        float coord_y = 0.f;         // continent-space Y
+    };
+
+    struct MapBounds {
+        float cont_min_x = 0.f, cont_min_y = 0.f, cont_max_x = 0.f, cont_max_y = 0.f;
+        float map_min_x  = 0.f, map_min_y  = 0.f, map_max_x  = 0.f, map_max_y  = 0.f;
     };
 
     // A WvW map within a match
@@ -189,6 +196,12 @@ namespace RealmReport {
         static int  GetNearestWaypointId(const std::string& obj_id);
         static bool IsWaypointConditional(int waypoint_id);
 
+        // Map bounds / coordinate conversion
+        static MapBounds GetMapBounds(const std::string& mapType);
+        static void MumbleToContinent(const std::string& mapType,
+                                       float game_x, float game_z,
+                                       float& out_cx, float& out_cy);
+
     private:
         static void DetectFlips(const MatchData& old_data, const MatchData& new_data);
         // HTTP helper
@@ -198,6 +211,7 @@ namespace RealmReport {
         static void PollWorker();
         static void FetchMatchData();
         static void FetchObjectiveNames();
+        static void FetchMapBounds();
         static void FetchGuildName(const std::string& guild_id);
         static void LoadGuildCache();
         static void SaveGuildCache();
@@ -207,6 +221,11 @@ namespace RealmReport {
         static std::unordered_map<std::string, std::string> s_objective_names;
         // Objective type cache: objective_id -> type string
         static std::unordered_map<std::string, std::string> s_objective_types;
+        // Objective coord cache: objective_id -> {cx, cy}
+        static std::unordered_map<std::string, std::pair<float,float>> s_objective_coords;
+        // Map bounds cache
+        static std::atomic<bool> s_bounds_cached;
+        static std::unordered_map<std::string, MapBounds> s_map_bounds;
         // Guild name cache: guild_id -> guild name/tag
         static std::unordered_map<std::string, std::string> s_guild_names;
 
