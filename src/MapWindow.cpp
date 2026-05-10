@@ -268,8 +268,22 @@ void MapWindow::RenderObjectives(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
     }
 }
 
-void MapWindow::RenderPlayerDot(ImDrawList* /*dl*/, ImVec2 /*winPos*/,
-                                 ImVec2 /*winSize*/, int /*idx*/,
-                                 float /*game_x*/, float /*game_z*/) {
-    // Implemented in Task 7
+void MapWindow::RenderPlayerDot(ImDrawList* dl, ImVec2 winPos, ImVec2 winSize,
+                                 int idx, float game_x, float game_z) {
+    // game_x/z are 0 when Mumble Link not active
+    if (game_x == 0.f && game_z == 0.f) return;
+
+    float cx, cy;
+    RealmReport::WvWAPI::MumbleToContinent(k_MapTypes[idx], game_x, game_z, cx, cy);
+    if (cx == 0.f && cy == 0.f) return;  // bounds not loaded yet
+
+    ImVec2 sp = ContToScreen(idx, winPos, winSize, cx, cy);
+
+    // Cull if off-screen
+    if (sp.x < winPos.x || sp.x > winPos.x + winSize.x) return;
+    if (sp.y < winPos.y || sp.y > winPos.y + winSize.y) return;
+
+    // Bright yellow dot with black outline
+    dl->AddCircleFilled(sp, 7.f, IM_COL32(255, 240, 60, 255));
+    dl->AddCircle(sp, 7.f, IM_COL32(0, 0, 0, 200), 0, 2.f);
 }
