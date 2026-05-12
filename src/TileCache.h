@@ -4,6 +4,7 @@
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include "nexus/Nexus.h"
 
@@ -62,4 +63,8 @@ private:
     std::queue<TileKey>     m_dlQueue;
     bool                    m_running = false;
     std::thread             m_worker;
+
+    // Active WinINet session handle — Shutdown() closes it to interrupt a live download.
+    // Atomic void* so Shutdown and DownloadTile can exchange it without a separate mutex.
+    std::atomic<void*>      m_activeSession{nullptr};
 };

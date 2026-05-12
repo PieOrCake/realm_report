@@ -14,7 +14,7 @@ public:
     // Called every frame from AddonRender when enabled.
     // game_x/game_z are Mumble Link fAvatarPosition[0] and [2] (metres).
     void Render(const RealmReport::MatchData& md, bool inWvw, int mumbleMapId,
-                float game_x, float game_z);
+                float game_x, float game_z, bool& pinned, float pinnedOpacity);
 
     bool enabled = false;
 

@@ -40,6 +40,11 @@ void TileCache::Shutdown() {
         std::lock_guard<std::mutex> lk(m_dlMu);
         m_running = false;
     }
+    // Close the active WinINet session if a download is in progress.
+    // This causes InternetReadFile to fail and return immediately.
+    HINTERNET active = (HINTERNET)m_activeSession.exchange(nullptr);
+    if (active) InternetCloseHandle(active);
+
     m_dlCv.notify_all();
     if (m_worker.joinable()) m_worker.join();
 }
@@ -132,7 +137,7 @@ void TileCache::DownloadWorker() {
         {
             std::unique_lock<std::mutex> lk(m_dlMu);
             m_dlCv.wait(lk, [this]{ return !m_dlQueue.empty() || !m_running; });
-            if (!m_running && m_dlQueue.empty()) break;
+            if (!m_running) break;
             key = m_dlQueue.front();
             m_dlQueue.pop();
         }
@@ -142,27 +147,47 @@ void TileCache::DownloadWorker() {
             m_readyQueue.push(key);
         }
 
-        // Rate limit: 100ms between downloads
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Rate-limit gap — use wait_for so Shutdown() wakes us immediately.
+        {
+            std::unique_lock<std::mutex> lk(m_dlMu);
+            m_dlCv.wait_for(lk, std::chrono::milliseconds(100),
+                            [this]{ return !m_running; });
+            if (!m_running) break;
+        }
     }
 }
 
 bool TileCache::DownloadTile(const TileKey& key) {
-    // URL: https://tiles.guildwars2.com/2/3/{z}/{x}/{y}.jpg
-    std::string path = "/2/3/" + std::to_string(key.z) + "/" +
-                       std::to_string(key.x) + "/" +
-                       std::to_string(key.y) + ".jpg";
-    std::string url  = "https://tiles.guildwars2.com" + path;
+    if (!m_running) return false;
+
+    // Continent 2 (Tyria), floor 3 — all four WvW maps share this continent/floor.
+    std::string urlPath = "/2/3/" + std::to_string(key.z) + "/" +
+                          std::to_string(key.x) + "/" +
+                          std::to_string(key.y) + ".jpg";
+    std::string url = "https://tiles.guildwars2.com" + urlPath;
 
     HINTERNET hInternet = InternetOpenA("RealmReport/1.0",
         INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (!hInternet) return false;
 
+    // Register so Shutdown() can close this handle to interrupt a live download.
+    // If Shutdown already ran (exchange returns non-null new value isn't our concern —
+    // we just need to know if our handle was already closed by Shutdown).
+    void* expected = nullptr;
+    if (!m_activeSession.compare_exchange_strong(expected, (void*)hInternet)) {
+        // Shutdown() closed or is closing things — bail out.
+        InternetCloseHandle(hInternet);
+        return false;
+    }
+
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
-                  INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
+                  INTERNET_FLAG_SECURE;
     HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, flags, 0);
     if (!hUrl) {
-        InternetCloseHandle(hInternet);
+        void* ours = (void*)hInternet;
+        if (m_activeSession.compare_exchange_strong(ours, nullptr))
+            InternetCloseHandle(hInternet);
+        // else: Shutdown already closed it — don't double-close.
         return false;
     }
 
@@ -174,7 +199,13 @@ bool TileCache::DownloadTile(const TileKey& key) {
     }
 
     InternetCloseHandle(hUrl);
-    InternetCloseHandle(hInternet);
+
+    // Try to reclaim the session handle. If Shutdown() already exchanged it away and
+    // closed it, skip our close to avoid a double-free.
+    void* ours = (void*)hInternet;
+    if (m_activeSession.compare_exchange_strong(ours, nullptr))
+        InternetCloseHandle(hInternet);
+    // else: Shutdown already closed hInternet — don't touch it.
 
     if (data.empty()) return false;
 

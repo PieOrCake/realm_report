@@ -62,15 +62,34 @@ ImVec2 MapWindow::ContToScreen(int idx, ImVec2 winPos, ImVec2 winSize, float cx,
 }
 
 void MapWindow::Render(const RealmReport::MatchData& md, bool inWvw,
-                       int mumbleMapId, float game_x, float game_z) {
+                       int mumbleMapId, float game_x, float game_z,
+                       bool& pinned, float pinnedOpacity) {
     m_tiles.ProcessReadyQueue();
 
     ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints(ImVec2(300, 250), ImVec2(FLT_MAX, FLT_MAX));
-    if (!ImGui::Begin("WvW Battlefield Map", &enabled,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+    ImGuiWindowFlags mapFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    bool pushedAlpha = false;
+    if (pinned) {
+        mapFlags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
+                 |  ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBringToFrontOnFocus
+                 |  ImGuiWindowFlags_NoFocusOnAppearing;
+        ImGui::SetNextWindowBgAlpha(pinnedOpacity);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, pinnedOpacity);
+        pushedAlpha = true;
+    }
+    if (!ImGui::Begin("WvW Battlefield Map", &enabled, mapFlags)) {
         ImGui::End();
+        if (pushedAlpha) ImGui::PopStyleVar();
         return;
+    }
+
+    // Pin button — right-aligned, only when not pinned
+    if (!pinned) {
+        float btnW = ImGui::CalcTextSize("Pin").x + ImGui::GetStyle().FramePadding.x * 2;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - btnW);
+        if (ImGui::SmallButton("Pin")) pinned = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lock position & click-through");
     }
 
     if (ImGui::BeginTabBar("##wvwmaps")) {
@@ -131,7 +150,28 @@ void MapWindow::Render(const RealmReport::MatchData& md, bool inWvw,
         ImGui::EndTabBar();
     }
 
+    ImVec2 mapWinPos  = ImGui::GetWindowPos();
+    ImVec2 mapWinSize = ImGui::GetWindowSize();
     ImGui::End();
+    if (pushedAlpha) ImGui::PopStyleVar();
+
+    if (pinned) {
+        float unpinW = ImGui::CalcTextSize("Unpin").x + ImGui::GetStyle().FramePadding.x * 2 + 8;
+        float unpinH = ImGui::GetFrameHeight() + 4;
+        ImGui::SetNextWindowPos(ImVec2(mapWinPos.x + mapWinSize.x - unpinW - 2, mapWinPos.y + 1));
+        ImGui::SetNextWindowSize(ImVec2(unpinW, unpinH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 2));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
+        ImGui::Begin("##RR_MapUnpin", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove
+            | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar
+            | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings
+            | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing
+            | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        if (ImGui::SmallButton("Unpin")) pinned = false;
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+    }
 }
 
 void MapWindow::RenderTab(int idx, const RealmReport::WvWMap& wvwMap, bool inWvw,

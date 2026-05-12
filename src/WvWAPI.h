@@ -141,7 +141,7 @@ namespace RealmReport {
         static void FetchNow();
 
         // Status
-        static const std::string& GetStatusMessage();
+        static std::string GetStatusMessage();
         static bool IsError();
 
         // Polling interval
@@ -242,6 +242,7 @@ namespace RealmReport {
         static std::atomic<bool> s_is_error;
         static std::atomic<bool> s_polling;
         static std::atomic<bool> s_shutdown;
+        static std::atomic<void*> s_active_http_session;
         static std::atomic<bool> s_fetch_now;
         static int s_poll_interval;
         static std::chrono::steady_clock::time_point s_last_fetch_time;

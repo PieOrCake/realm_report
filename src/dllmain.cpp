@@ -20,7 +20,7 @@
 // Version constants
 #define V_MAJOR 0
 #define V_MINOR 9
-#define V_BUILD 4
+#define V_BUILD 3
 #define V_REVISION 0
 
 
@@ -1337,12 +1337,15 @@ static void PlayFlipSound() {
     }
 
     if (ext == ".mp3") {
+        // Reject filenames with characters that would break the MCI command string.
+        if (g_FlipSoundFile.find_first_of("\"\r\n") != std::string::npos) return;
+
         // Use MCI for mp3 playback — unique alias to avoid conflicts with other addons
-        static int s_mciCounter = 0;
+        static unsigned int s_mciCounter = 0;
         std::string alias = "RR_Snd_" + std::to_string(++s_mciCounter);
         // Close previous instance if any
-        if (s_mciCounter > 1) {
-            std::string prevAlias = "RR_Snd_" + std::to_string(s_mciCounter - 1);
+        if (s_mciCounter > 1u) {
+            std::string prevAlias = "RR_Snd_" + std::to_string(s_mciCounter - 1u);
             mciSendStringA(("close " + prevAlias).c_str(), NULL, 0, NULL);
         }
         std::string cmd = "open \"" + fullPath + "\" type mpegvideo alias " + alias;
@@ -1698,6 +1701,27 @@ void AddonRender() {
         RealmReport::WvWAPI::PopFlipEvents();
     }
 
+    // WvW Battlefield Map — independent of main window visibility
+    if (g_ShowMapWindow) {
+        MumbleLinkedMem* mumble_map = (MumbleLinkedMem*)APIDefs->DataLink_Get(DL_MUMBLE_LINK);
+        float map_game_x = 0.f, map_game_z = 0.f;
+        int map_mumble_id = 0;
+        if (mumble_map && mumble_map->context_len >= 36) {
+            GW2Context* ctx = (GW2Context*)mumble_map->context;
+            map_mumble_id = (int)ctx->mapId;
+            map_game_x = mumble_map->fAvatarPosition[0];
+            map_game_z = mumble_map->fAvatarPosition[2];
+        }
+        RealmReport::MatchData map_md = RealmReport::WvWAPI::GetMatchData();
+        g_MapWindow.Render(map_md, g_IsOnWvWMap, map_mumble_id, map_game_x, map_game_z,
+                           g_WindowPinned, g_PinnedOpacity);
+        if (!g_MapWindow.enabled) {
+            g_ShowMapWindow = false;
+            RealmReport::WvWAPI::SetShowMapWindow(false);
+            RealmReport::WvWAPI::SaveSelectedWorld();
+        }
+    }
+
     if (!g_WindowVisible) return;
 
     ImGui::SetNextWindowSizeConstraints(ImVec2(380, 200), ImVec2(FLT_MAX, FLT_MAX));
@@ -1719,15 +1743,37 @@ void AddonRender() {
         return;
     }
 
-    // Pin button (right-aligned, top of content area) — only when not pinned
-    if (!g_WindowPinned) {
-        float avail = ImGui::GetContentRegionAvail().x;
-        ImGui::SameLine(avail - ImGui::CalcTextSize("Pin").x - ImGui::GetStyle().FramePadding.x * 2);
-        if (ImGui::SmallButton("Pin")) {
-            g_WindowPinned = true;
+    // Map + Pin buttons (right-aligned, top of content area)
+    {
+        float pad      = ImGui::GetStyle().FramePadding.x * 2;
+        float mapBtnW  = ImGui::CalcTextSize("Map").x + pad;
+        float pinBtnW  = g_WindowPinned ? 0.0f : (ImGui::CalcTextSize("Pin").x + pad + 4.0f);
+        float avail    = ImGui::GetContentRegionAvail().x;
+
+        ImGui::SameLine(avail - mapBtnW - pinBtnW);
+        if (g_ShowMapWindow) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.25f, 0.45f, 0.70f, 0.45f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.45f, 0.70f, 0.65f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f, 0.2f, 0.2f, 0.3f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.4f));
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Lock position & click-through");
+        if (ImGui::SmallButton("Map")) {
+            g_ShowMapWindow = !g_ShowMapWindow;
+            g_MapWindow.enabled = g_ShowMapWindow;
+            RealmReport::WvWAPI::SetShowMapWindow(g_ShowMapWindow);
+            RealmReport::WvWAPI::SaveSelectedWorld();
+        }
+        ImGui::PopStyleColor(2);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Toggle WvW Battlefield Map (Alt+M)");
+
+        if (!g_WindowPinned) {
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("Pin"))
+                g_WindowPinned = true;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Lock position & click-through");
         }
     }
 
@@ -1886,20 +1932,6 @@ void AddonRender() {
         ImGui::PopStyleVar(2);
     }
 
-    // WvW Battlefield Map window
-    if (g_ShowMapWindow) {
-        MumbleLinkedMem* mumble = (MumbleLinkedMem*)APIDefs->DataLink_Get(DL_MUMBLE_LINK);
-        float game_x = 0.f, game_z = 0.f;
-        int mumble_map_id = 0;
-        if (mumble && mumble->context_len >= 36) {
-            GW2Context* ctx = (GW2Context*)mumble->context;
-            mumble_map_id = (int)ctx->mapId;
-            game_x = mumble->fAvatarPosition[0];
-            game_z = mumble->fAvatarPosition[2];
-        }
-        RealmReport::MatchData md = RealmReport::WvWAPI::GetMatchData();
-        g_MapWindow.Render(md, g_IsOnWvWMap, mumble_map_id, game_x, game_z);
-    }
 }
 
 // --- Options/Settings Render ---
@@ -1928,14 +1960,7 @@ void AddonOptions() {
         }
     }
 
-    // Map window
-    if (ImGui::Checkbox("Show WvW Battlefield Map", &g_ShowMapWindow)) {
-        g_MapWindow.enabled = g_ShowMapWindow;
-        RealmReport::WvWAPI::SetShowMapWindow(g_ShowMapWindow);
-        RealmReport::WvWAPI::SaveSelectedWorld();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(Alt+M)");
+
 
     ImGui::Spacing();
 

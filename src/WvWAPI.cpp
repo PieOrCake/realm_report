@@ -87,6 +87,7 @@ namespace RealmReport {
     std::atomic<bool> WvWAPI::s_is_error{false};
     std::atomic<bool> WvWAPI::s_polling{false};
     std::atomic<bool> WvWAPI::s_shutdown{false};
+    std::atomic<void*> WvWAPI::s_active_http_session{nullptr};
     std::atomic<bool> WvWAPI::s_fetch_now{false};
     int WvWAPI::s_poll_interval = 30;
     std::chrono::steady_clock::time_point WvWAPI::s_last_fetch_time{};
@@ -158,12 +159,18 @@ namespace RealmReport {
             INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
         if (!hInternet) return "";
 
+        // Register the session so Shutdown() can interrupt an in-progress request.
+        void* expected = nullptr;
+        s_active_http_session.compare_exchange_strong(expected, (void*)hInternet);
+
         DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
-                      INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
+                      INTERNET_FLAG_SECURE;
 
         HINTERNET hUrl = InternetOpenUrlA(hInternet, url.c_str(), NULL, 0, flags, 0);
         if (!hUrl) {
-            InternetCloseHandle(hInternet);
+            void* ours = (void*)hInternet;
+            if (s_active_http_session.compare_exchange_strong(ours, nullptr))
+                InternetCloseHandle(hInternet);
             return "";
         }
 
@@ -175,7 +182,12 @@ namespace RealmReport {
         }
 
         InternetCloseHandle(hUrl);
-        InternetCloseHandle(hInternet);
+
+        // Deregister and close the session handle. If Shutdown() already closed it, skip.
+        void* ours = (void*)hInternet;
+        if (s_active_http_session.compare_exchange_strong(ours, nullptr))
+            InternetCloseHandle(hInternet);
+
         return result;
     }
 
@@ -199,6 +211,9 @@ namespace RealmReport {
     void WvWAPI::Shutdown() {
         s_shutdown.store(true);
         s_polling.store(false);
+        // Interrupt any in-progress WinINet request so the poll thread exits promptly.
+        HINTERNET active = (HINTERNET)s_active_http_session.exchange(nullptr);
+        if (active) InternetCloseHandle(active);
     }
 
     // --- World Restructuring team names (not available via API) ---
@@ -728,11 +743,12 @@ namespace RealmReport {
         float cw = b.cont_max_x - b.cont_min_x;
         float ch = b.cont_max_y - b.cont_min_y;
         if (mw == 0.f || mh == 0.f) { cx = 0.f; cy = 0.f; return; }
-        // GW2 Mumble Link uses metres; GW2 map_rect uses inches (1 inch = 1/39.3701 m)
+        // Mumble metres → map_rect inches. map_rect Y is north-positive; continent Y is
+        // south-positive (screen coords), so Y must be flipped when mapping to continent.
         float ix = gx * 39.3701f;
         float iy = gz * 39.3701f;
         cx = (ix - b.map_min_x) / mw * cw + b.cont_min_x;
-        cy = (iy - b.map_min_y) / mh * ch + b.cont_min_y;
+        cy = (b.map_max_y - iy) / mh * ch + b.cont_min_y;
     }
 
     // --- Guild Name Resolution ---
@@ -746,9 +762,14 @@ namespace RealmReport {
             file >> j;
             std::lock_guard<std::mutex> lock(s_mutex);
             for (auto it = j.begin(); it != j.end(); ++it) {
-                s_guild_names[it.key()] = it.value().get<std::string>();
+                if (it.value().is_string())
+                    s_guild_names[it.key()] = it.value().get<std::string>();
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            // Corrupted cache file — log and continue without cached names.
+            OutputDebugStringA(("RealmReport: guild cache load failed: " +
+                                std::string(e.what()) + "\n").c_str());
+        }
     }
 
     void WvWAPI::SaveGuildCache() {
@@ -1176,7 +1197,8 @@ namespace RealmReport {
         return s_data_version.load();
     }
 
-    const std::string& WvWAPI::GetStatusMessage() {
+    std::string WvWAPI::GetStatusMessage() {
+        std::lock_guard<std::mutex> lock(s_mutex);
         return s_status_message;
     }
 
