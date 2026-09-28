@@ -48,7 +48,10 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 
 ### Combat Stats
 - **Kills, deaths, and K/D ratio** for your current WvW session, read from the game — no ArcDPS required
-- **Resets** on entering WvW or on demand
+- **WvW rank and progress** — your rank, ranks gained, WXP gained, and rank progress
+- **Pips earned** this session
+- **WvW currencies earned** — Tickets, Badges of Honor and more, each individually toggleable
+- **Session survives** a character change, game restart or crash; starts fresh after a configurable time away, or on demand
 
 ### Weekly Tracker
 
@@ -58,6 +61,7 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 
 ### Flip Notifications
 - **Toast notifications** when any objective changes hands, tagged with the map
+- **Current map only** — optionally limit toasts to the map you're on
 - **Configurable sound** — play a WAV or MP3 on each flip
 - **Configurable position and duration**
 - **Auto-paused** when you leave WvW
